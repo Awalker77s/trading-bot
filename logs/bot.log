@@ -220,3 +220,255 @@ Checking NVDA...
 NVDA: fetched 307 bars
 Signal result: False | Reason: RSI not in valid range
 Close=185.75, SMA20=185.81, SMA50=185.82, SMA200=176.65, RSI14=47.80
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 100260
+Buying Power: 150378.64
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=611.47, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+Realized P/L today: 0.00 | Daily loss limit: -3007.73
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=681.11, SMA20=684.66, SMA50=687.67, SMA200=657.36, RSI14=45.98
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=261.31, SMA20=264.98, SMA50=263.79, SMA200=244.74, RSI14=46.11
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=406.06, SMA20=401.21, SMA50=434.57, SMA200=484.08, RSI14=54.98
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=185.95, SMA20=185.82, SMA50=185.82, SMA200=176.65, RSI14=48.00
+
+Checking AMZN...
+AMZN: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=214.41, SMA20=208.34, SMA50=224.65, SMA200=224.60, RSI14=62.20
+
+Checking META...
+META: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=657.41, SMA20=651.70, SMA50=655.95, SMA200=691.66, RSI14=56.20
+
+Checking TSLA...
+TSLA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=403.58, SMA20=408.87, SMA50=424.64, SMA200=392.72, RSI14=45.51
+
+==================================================
+DAILY SUMMARY
+Date: 2026-03-10
+Closed trades today: 0
+Wins: 0 | Losses: 0 | Breakeven: 0
+Realized P/L today: 0.00
+Daily loss limit: -3007.80
+==================================================
+
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 100268.2
+Buying Power: 150386.84
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=611.61, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+Realized P/L today: 0.00 | Daily loss limit: -3008.02
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=681.49, SMA20=684.68, SMA50=687.68, SMA200=657.36, RSI14=46.30
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=261.36, SMA20=264.99, SMA50=263.79, SMA200=244.74, RSI14=46.18
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=406.28, SMA20=401.22, SMA50=434.57, SMA200=484.08, RSI14=55.17
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=185.66, SMA20=185.80, SMA50=185.82, SMA200=176.65, RSI14=47.70
+
+Checking AMZN...
+AMZN: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=214.53, SMA20=208.34, SMA50=224.66, SMA200=224.60, RSI14=62.32
+
+Checking META...
+META: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=656.98, SMA20=651.68, SMA50=655.94, SMA200=691.66, RSI14=56.04
+
+Checking TSLA...
+TSLA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=402.65, SMA20=408.82, SMA50=424.62, SMA200=392.71, RSI14=44.92
+
+==================================================
+DAILY SUMMARY
+Date: 2026-03-10
+Closed trades today: 0
+Wins: 0 | Losses: 0 | Breakeven: 0
+Realized P/L today: 0.00
+Daily loss limit: -3008.07
+==================================================
+
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 100256.72
+Buying Power: 150375.36
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=611.61, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+Realized P/L today: 0.00 | Daily loss limit: -3007.70
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=681.37, SMA20=684.67, SMA50=687.68, SMA200=657.36, RSI14=46.20
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=261.51, SMA20=264.99, SMA50=263.79, SMA200=244.74, RSI14=46.39
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=406.52, SMA20=401.24, SMA50=434.57, SMA200=484.08, RSI14=55.38
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=185.93, SMA20=185.82, SMA50=185.82, SMA200=176.65, RSI14=47.98
+
+Checking AMZN...
+AMZN: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=214.59, SMA20=208.34, SMA50=224.66, SMA200=224.60, RSI14=62.37
+
+Checking META...
+META: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=657.03, SMA20=651.68, SMA50=655.94, SMA200=691.66, RSI14=56.06
+
+Checking TSLA...
+TSLA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=402.65, SMA20=408.82, SMA50=424.62, SMA200=392.71, RSI14=44.92
+
+==================================================
+DAILY SUMMARY
+Date: 2026-03-10
+Closed trades today: 0
+Wins: 0 | Losses: 0 | Breakeven: 0
+Realized P/L today: 0.00
+Daily loss limit: -3007.63
+==================================================
+
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 100201.78
+Buying Power: 150320.42
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=610.80, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+Realized P/L today: 0.00 | Daily loss limit: -3005.95
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=680.50, SMA20=684.63, SMA50=687.66, SMA200=657.36, RSI14=45.46
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=261.38, SMA20=264.99, SMA50=263.79, SMA200=244.74, RSI14=46.21
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=405.81, SMA20=401.20, SMA50=434.56, SMA200=484.08, RSI14=54.77
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=185.52, SMA20=185.80, SMA50=185.81, SMA200=176.65, RSI14=47.56
+
+Checking AMZN...
+AMZN: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=214.25, SMA20=208.33, SMA50=224.65, SMA200=224.60, RSI14=62.05
+
+Checking META...
+META: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=656.45, SMA20=651.65, SMA50=655.93, SMA200=691.66, RSI14=55.83
+
+Checking TSLA...
+TSLA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=401.37, SMA20=408.76, SMA50=424.59, SMA200=392.71, RSI14=44.08
+
+==================================================
+DAILY SUMMARY
+Date: 2026-03-10
+Closed trades today: 0
+Wins: 0 | Losses: 0 | Breakeven: 0
+Realized P/L today: 0.00
+Daily loss limit: -3005.99
+==================================================
+
