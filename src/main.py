@@ -17,10 +17,12 @@ import os
 import math
 import json
 import time
+import random
 import logging
 import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -100,6 +102,7 @@ SHORT_RSI_MAX = 60               # Short entry: RSI ceiling
 # Retry configuration
 MAX_RETRIES = 3
 RETRY_DELAY_BASE = 2
+RETRY_DELAY_MAX_SECONDS = 20
 
 # End-of-day flattening (4:00 PM ET = 21:00 UTC during regular market hours)
 EOD_FLATTEN_UTC_HOUR = 20
@@ -139,8 +142,13 @@ def ensure_directories():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_environment():
-    load_dotenv(str(ENV_PATH))
+def load_environment() -> None:
+    if ENV_PATH.exists():
+        load_dotenv(str(ENV_PATH))
+    else:
+        load_dotenv()
+        log.warning(f"Env file not found at {ENV_PATH}; relying on process environment")
+
 
 
 def get_required_env(name: str) -> str:
@@ -693,6 +701,19 @@ def evaluate_entry(df: pd.DataFrame) -> tuple[bool, str, str, str]:
 # POSITION SIZING
 # ============================================================
 
+def get_stop_target_multipliers(regime: str, direction: str) -> tuple[float, float]:
+    if direction == "short":
+        return ATR_STOP_MULTIPLIER_SHORT, ATR_TARGET_MULTIPLIER_SHORT
+    if regime == "trending":
+        return ATR_STOP_MULTIPLIER_TREND, ATR_TARGET_MULTIPLIER_TREND
+    if regime == "ranging":
+        return ATR_STOP_MULTIPLIER_RANGE, ATR_TARGET_MULTIPLIER_RANGE
+    return (
+        (ATR_STOP_MULTIPLIER_TREND + ATR_STOP_MULTIPLIER_RANGE) / 2,
+        (ATR_TARGET_MULTIPLIER_TREND + ATR_TARGET_MULTIPLIER_RANGE) / 2,
+    )
+
+
 def position_size_from_atr(
     equity: float,
     entry_price: float,
@@ -730,31 +751,63 @@ def position_size_from_atr(
 # API CLIENTS
 # ============================================================
 
-def create_clients():
+def create_clients() -> tuple[TradingClient, StockHistoricalDataClient]:
     api_key = get_required_env("ALPACA_KEY")
     api_secret = get_required_env("ALPACA_SECRET")
-    trading_client = TradingClient(api_key, api_secret, paper=True)
+    paper_mode = os.getenv("ALPACA_PAPER", "true").strip().lower() in {"1", "true", "yes", "on"}
+    trading_client = TradingClient(api_key, api_secret, paper=paper_mode)
     data_client = StockHistoricalDataClient(api_key, api_secret)
+    log.info(f"Alpaca client configured | paper={paper_mode}")
     return trading_client, data_client
 
 
-def retry_api_call(func, *args, max_retries=MAX_RETRIES, **kwargs):
-    """Execute an API call with exponential backoff retry."""
+def retry_api_call(
+    func: Callable[..., Any],
+    *args: Any,
+    max_retries: int = MAX_RETRIES,
+    **kwargs: Any,
+) -> Any:
+    """Execute API call with bounded exponential backoff and jitter."""
     for attempt in range(max_retries + 1):
         try:
             return func(*args, **kwargs)
         except Exception as e:
             if attempt == max_retries:
+                log.error(f"API call failed after {max_retries + 1} attempts: {e}")
                 raise
-            delay = RETRY_DELAY_BASE ** (attempt + 1)
-            log.warning(f"API call failed (attempt {attempt + 1}): {e}. "
-                        f"Retrying in {delay}s...")
+            base_delay = RETRY_DELAY_BASE ** (attempt + 1)
+            delay = min(RETRY_DELAY_MAX_SECONDS, base_delay + random.uniform(0, 0.5))
+            log.warning(
+                f"API call failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                f"Retrying in {delay:.1f}s..."
+            )
             time.sleep(delay)
 
 
 # ============================================================
 # DATA FETCHING
 # ============================================================
+
+def validate_bars_df(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Validate and sanitize market data frame used for indicator calculations."""
+    required_columns = ["timestamp", "open", "high", "low", "close", "volume"]
+    missing = [col for col in required_columns if col not in df.columns]
+    if missing:
+        log.warning(f"{symbol}: missing required bar columns: {missing}")
+        return pd.DataFrame()
+
+    cleaned = df[required_columns].copy()
+    cleaned = cleaned.dropna(subset=["open", "high", "low", "close", "volume"])
+    cleaned = cleaned[(cleaned[["open", "high", "low", "close", "volume"]] > 0).all(axis=1)]
+
+    if cleaned.empty:
+        log.warning(f"{symbol}: all bars invalid after cleaning")
+        return pd.DataFrame()
+
+    cleaned = cleaned.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+    cleaned.reset_index(drop=True, inplace=True)
+    return cleaned
+
 
 def fetch_daily_bars(data_client: StockHistoricalDataClient,
                      symbol: str) -> pd.DataFrame:
@@ -778,9 +831,9 @@ def fetch_daily_bars(data_client: StockHistoricalDataClient,
     else:
         df = df.reset_index()
 
-    df = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
-    df.sort_values("timestamp", inplace=True)
-    df.reset_index(drop=True, inplace=True)
+    df = validate_bars_df(df, symbol)
+    if df.empty:
+        return df
 
     log.info(f"{symbol}: fetched {len(df)} daily bars")
     return df
@@ -800,46 +853,43 @@ def get_account_equity(trading_client: TradingClient) -> float:
     return float(account.equity)
 
 
-def place_market_buy(trading_client: TradingClient, symbol: str, qty: int):
+def submit_market_order(
+    trading_client: TradingClient,
+    symbol: str,
+    qty: int,
+    side: OrderSide,
+    context: str,
+):
+    """Submit a validated market order with consistent logging."""
+    if qty <= 0:
+        raise ValueError(f"{symbol}: invalid qty={qty} for {context}")
+
     order_data = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
-        side=OrderSide.BUY,
-        time_in_force=TimeInForce.DAY
+        side=side,
+        time_in_force=TimeInForce.DAY,
     )
+    log.info(f"{symbol}: submitting order | context={context} | side={side} | qty={qty}")
     return retry_api_call(trading_client.submit_order, order_data=order_data)
+
+
+def place_market_buy(trading_client: TradingClient, symbol: str, qty: int):
+    return submit_market_order(trading_client, symbol, qty, OrderSide.BUY, "ENTRY_LONG")
 
 
 def place_market_sell(trading_client: TradingClient, symbol: str, qty: int):
-    order_data = MarketOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=OrderSide.SELL,
-        time_in_force=TimeInForce.DAY
-    )
-    return retry_api_call(trading_client.submit_order, order_data=order_data)
+    return submit_market_order(trading_client, symbol, qty, OrderSide.SELL, "EXIT_LONG")
 
 
 def place_short_entry(trading_client: TradingClient, symbol: str, qty: int):
     """Sell short — opens a short position."""
-    order_data = MarketOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=OrderSide.SELL,
-        time_in_force=TimeInForce.DAY
-    )
-    return retry_api_call(trading_client.submit_order, order_data=order_data)
+    return submit_market_order(trading_client, symbol, qty, OrderSide.SELL, "ENTRY_SHORT")
 
 
 def place_short_exit(trading_client: TradingClient, symbol: str, qty: int):
     """Buy to cover — closes a short position."""
-    order_data = MarketOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=OrderSide.BUY,
-        time_in_force=TimeInForce.DAY
-    )
-    return retry_api_call(trading_client.submit_order, order_data=order_data)
+    return submit_market_order(trading_client, symbol, qty, OrderSide.BUY, "EXIT_SHORT")
 
 
 def submit_position_close_order(trading_client: TradingClient,
@@ -850,39 +900,34 @@ def submit_position_close_order(trading_client: TradingClient,
     """Submit closing market order and log the exact payload used."""
     side = OrderSide.BUY if is_short else OrderSide.SELL
     side_label = "BUY (cover short)" if is_short else "SELL (close long)"
-    order_data = MarketOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=side,
-        time_in_force=TimeInForce.DAY
-    )
     log.info(
         f"{symbol}: SUBMIT CLOSE ORDER | reason={reason} | "
         f"order={{type=market, side={side_label}, qty={qty}, tif=DAY}}"
     )
-    return retry_api_call(trading_client.submit_order, order_data=order_data)
+    return submit_market_order(trading_client, symbol, qty, side, f"CLOSE_{reason}")
 
 
 # ============================================================
 # TRADE LOG HELPERS
 # ============================================================
 
-def find_latest_open_buy(log_data: list, symbol: str) -> dict | None:
+def find_latest_open_trade(log_data: list[dict], symbol: str, side: str) -> dict | None:
     for entry in reversed(log_data):
-        if (entry.get("symbol") == symbol
-                and entry.get("side") == "BUY"
-                and not entry.get("closed", False)):
+        if (
+            entry.get("symbol") == symbol
+            and entry.get("side") == side
+            and not entry.get("closed", False)
+        ):
             return entry
     return None
+
+
+def find_latest_open_buy(log_data: list, symbol: str) -> dict | None:
+    return find_latest_open_trade(log_data, symbol, "BUY")
 
 
 def find_latest_open_short(log_data: list, symbol: str) -> dict | None:
-    for entry in reversed(log_data):
-        if (entry.get("symbol") == symbol
-                and entry.get("side") == "SHORT"
-                and not entry.get("closed", False)):
-            return entry
-    return None
+    return find_latest_open_trade(log_data, symbol, "SHORT")
 
 
 def has_exited_today(log_data: list, symbol: str) -> bool:
@@ -1260,19 +1305,11 @@ def scan_for_new_entries(trading_client: TradingClient,
             entry_price = float(latest["close"])
             current_atr = float(latest["atr"])
 
-            # Determine stop/target multipliers based on regime and direction
-            if direction == "short":
-                stop_mult = ATR_STOP_MULTIPLIER_SHORT
-                target_mult = ATR_TARGET_MULTIPLIER_SHORT
-            elif regime == "trending":
-                stop_mult = ATR_STOP_MULTIPLIER_TREND
-                target_mult = ATR_TARGET_MULTIPLIER_TREND
-            elif regime == "ranging":
-                stop_mult = ATR_STOP_MULTIPLIER_RANGE
-                target_mult = ATR_TARGET_MULTIPLIER_RANGE
-            else:
-                stop_mult = (ATR_STOP_MULTIPLIER_TREND + ATR_STOP_MULTIPLIER_RANGE) / 2
-                target_mult = (ATR_TARGET_MULTIPLIER_TREND + ATR_TARGET_MULTIPLIER_RANGE) / 2
+            if not np.isfinite(current_atr) or current_atr <= 0:
+                log.info(f"{symbol}: SKIP — invalid ATR for sizing ({current_atr})")
+                continue
+
+            stop_mult, target_mult = get_stop_target_multipliers(regime, direction)
 
             qty, stop_price = position_size_from_atr(
                 equity=account_equity,
@@ -1286,6 +1323,15 @@ def scan_for_new_entries(trading_client: TradingClient,
 
             if qty < 1:
                 log.info(f"{symbol}: SKIP — calculated qty < 1")
+                continue
+
+            if (direction == "long" and stop_price >= entry_price) or (
+                direction == "short" and stop_price <= entry_price
+            ):
+                log.warning(
+                    f"{symbol}: SKIP — invalid stop relative to entry "
+                    f"(entry={entry_price:.2f}, stop={stop_price:.2f}, direction={direction})"
+                )
                 continue
 
             # Target price depends on direction
