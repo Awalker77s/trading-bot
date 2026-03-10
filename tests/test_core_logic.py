@@ -94,3 +94,53 @@ def test_retry_retryable_error_retries(monkeypatch):
     result = main.retry_api_call(flaky_call, max_retries=3)
     assert result == "ok"
     assert calls["n"] == 3
+
+
+def test_get_open_positions_filters_non_stock_and_logs(monkeypatch):
+    class DummyPosition:
+        def __init__(self, symbol, asset_class):
+            self.symbol = symbol
+            self.asset_class = asset_class
+
+    class DummyClient:
+        def get_all_positions(self):
+            return [
+                DummyPosition("AAPL", "us_equity"),
+                DummyPosition("BTCUSD", "crypto"),
+            ]
+
+    logs = []
+    monkeypatch.setattr(main.log, "info", lambda msg, *args: logs.append(msg % args if args else msg))
+
+    positions = main.get_open_positions(DummyClient())
+
+    assert list(positions.keys()) == ["AAPL"]
+    assert any("Ignoring non-stock open position" in message for message in logs)
+
+
+def test_scan_for_new_entries_ignores_recently_submitted_exits(monkeypatch):
+    monkeypatch.setattr(main, "load_trade_log", lambda: [])
+    monkeypatch.setattr(main, "get_account_equity", lambda _client: 100000.0)
+    monkeypatch.setattr(main, "daily_loss_limit_hit", lambda *_args: (False, 0.0, 0.0))
+    monkeypatch.setattr(main, "WATCHLIST", [])
+
+    class DummyPosition:
+        def __init__(self, symbol):
+            self.symbol = symbol
+            self.asset_class = "us_equity"
+
+    class DummyClient:
+        def get_all_positions(self):
+            return [DummyPosition("SPY")]
+
+    captured = []
+    monkeypatch.setattr(main.log, "info", lambda message, *args: captured.append(message % args if args else message))
+
+    main.scan_for_new_entries(
+        DummyClient(),
+        data_client=None,
+        analysis_cache={},
+        recently_submitted_exits={"SPY"},
+    )
+
+    assert any("Ignoring recently submitted exits" in line for line in captured)

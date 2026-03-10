@@ -946,9 +946,46 @@ def build_symbol_analysis_cache(
 # POSITION / ACCOUNT HELPERS
 # ============================================================
 
+def _coerce_asset_class(value: Any) -> str:
+    """Normalize Alpaca asset class enums/strings into lowercase names."""
+    if value is None:
+        return ""
+    enum_value = getattr(value, "value", value)
+    return str(enum_value).strip().lower()
+
+
+def _is_stock_position(trading_client: TradingClient, position: Any) -> bool:
+    """Return True when a position belongs to a stock/equity asset class."""
+    asset_class = _coerce_asset_class(getattr(position, "asset_class", None))
+    if asset_class:
+        return asset_class in {"us_equity", "equity", "stock", "us equity"}
+
+    # Fallback: look up the asset record when position payload omits asset_class.
+    try:
+        asset = retry_api_call(trading_client.get_asset, position.symbol)
+        fallback_class = _coerce_asset_class(getattr(asset, "asset_class", None))
+        return fallback_class in {"us_equity", "equity", "stock", "us equity"}
+    except Exception:
+        return False
+
+
 def get_open_positions(trading_client: TradingClient) -> dict:
     positions = retry_api_call(trading_client.get_all_positions)
-    return {p.symbol: p for p in positions}
+    stock_positions: dict[str, Any] = {}
+
+    for position in positions:
+        if _is_stock_position(trading_client, position):
+            stock_positions[position.symbol] = position
+            continue
+
+        asset_class = _coerce_asset_class(getattr(position, "asset_class", None)) or "unknown"
+        log.info(
+            "%s: Ignoring non-stock open position (asset_class=%s)",
+            position.symbol,
+            asset_class,
+        )
+
+    return stock_positions
 
 
 def get_account_equity(trading_client: TradingClient) -> float:
@@ -1108,14 +1145,15 @@ def count_trading_days_held(entry_date_str: str) -> int:
 
 def manage_open_positions(trading_client: TradingClient,
                           data_client: StockHistoricalDataClient,
-                          analysis_cache: dict[str, pd.DataFrame] | None = None) -> None:
+                          analysis_cache: dict[str, pd.DataFrame] | None = None) -> set[str]:
     """Manage all open positions with dynamic exit logic (long and short)."""
     open_positions = get_open_positions(trading_client)
     log_data = load_trade_log()
+    submitted_exit_symbols: set[str] = set()
 
     if not open_positions:
         log.info("No open positions to manage.")
-        return
+        return submitted_exit_symbols
 
     for symbol, position in open_positions.items():
         try:
@@ -1281,6 +1319,8 @@ def manage_open_positions(trading_client: TradingClient,
                 )
                 exit_side = "SELL"
 
+            submitted_exit_symbols.add(symbol)
+
             realized_pnl = calculate_realized_pnl(trade_entry, current_price,
                                                   exit_qty)
 
@@ -1342,6 +1382,8 @@ def manage_open_positions(trading_client: TradingClient,
         except Exception as e:
             log.error(f"Error managing {symbol}: {e}\n{traceback.format_exc()}")
 
+    return submitted_exit_symbols
+
 
 # ============================================================
 # ENTRY SCANNING
@@ -1349,13 +1391,25 @@ def manage_open_positions(trading_client: TradingClient,
 
 def scan_for_new_entries(trading_client: TradingClient,
                          data_client: StockHistoricalDataClient,
-                         analysis_cache: dict[str, pd.DataFrame] | None = None) -> None:
+                         analysis_cache: dict[str, pd.DataFrame] | None = None,
+                         recently_submitted_exits: set[str] | None = None) -> None:
     """Scan watchlist for new entry signals."""
     log_data = load_trade_log()
     open_positions = get_open_positions(trading_client)
+    recently_submitted_exits = recently_submitted_exits or set()
+    effective_open_positions = {
+        symbol: position
+        for symbol, position in open_positions.items()
+        if symbol not in recently_submitted_exits
+    }
     account_equity = get_account_equity(trading_client)
 
-    log.info(f"Open positions: {sorted(open_positions.keys())}")
+    log.info(f"Open stock positions: {sorted(open_positions.keys())}")
+    if recently_submitted_exits:
+        log.info(
+            "Ignoring recently submitted exits for position cap checks: %s",
+            sorted(recently_submitted_exits),
+        )
     log.info(f"Account equity: ${account_equity:.2f}")
 
     loss_limit_hit, realized_today, loss_limit_dollars = daily_loss_limit_hit(
@@ -1367,12 +1421,12 @@ def scan_for_new_entries(trading_client: TradingClient,
         log.warning("DAILY LOSS LIMIT HIT — no new trades today.")
         return
 
-    if len(open_positions) >= MAX_OPEN_POSITIONS:
+    if len(effective_open_positions) >= MAX_OPEN_POSITIONS:
         log.info("Max open positions reached — no new trades.")
         return
 
     entries_this_run = 0
-    max_entries_per_run = MAX_OPEN_POSITIONS - len(open_positions)
+    max_entries_per_run = MAX_OPEN_POSITIONS - len(effective_open_positions)
 
     for symbol in WATCHLIST:
         if entries_this_run >= max_entries_per_run:
@@ -1380,7 +1434,7 @@ def scan_for_new_entries(trading_client: TradingClient,
             break
 
         try:
-            if symbol in open_positions:
+            if symbol in effective_open_positions:
                 log.info(f"{symbol}: SKIP — already in position")
                 continue
 
@@ -1585,17 +1639,23 @@ def run_bot() -> None:
              f"Buying Power: ${float(account.buying_power):,.2f}")
     log.info("-" * 60)
 
-    symbols_to_prepare = sorted(set(WATCHLIST) | set(get_open_positions(trading_client).keys()))
+    open_positions = get_open_positions(trading_client)
+    symbols_to_prepare = sorted(set(WATCHLIST) | set(open_positions.keys()))
     analysis_cache = build_symbol_analysis_cache(data_client, symbols_to_prepare)
     log.info(f"Prepared market analysis cache for {len(analysis_cache)}/{len(symbols_to_prepare)} symbols")
 
     # Phase 1: Manage existing positions (exits, trailing stops)
     log.info("PHASE 1: Managing open positions...")
-    manage_open_positions(trading_client, data_client, analysis_cache)
+    submitted_exits = manage_open_positions(trading_client, data_client, analysis_cache)
 
     # Phase 2: Scan for new entries
     log.info("\nPHASE 2: Scanning for new entries...")
-    scan_for_new_entries(trading_client, data_client, analysis_cache)
+    scan_for_new_entries(
+        trading_client,
+        data_client,
+        analysis_cache,
+        recently_submitted_exits=submitted_exits,
+    )
 
     # Phase 3: Daily summary + equity curve
     print_daily_summary(trading_client)
