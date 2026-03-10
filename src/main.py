@@ -146,10 +146,10 @@ def ensure_directories():
 
 
 def load_environment() -> None:
-    """Load environment from config/.env first, then process environment fallback."""
+    """Load environment from config/.env and override stale process env values."""
     if ENV_PATH.exists():
-        load_dotenv(str(ENV_PATH), override=False)
-        log.info(f"Loaded environment variables from {ENV_PATH}")
+        load_dotenv(str(ENV_PATH), override=True)
+        log.info(f"Loaded environment variables from {ENV_PATH} (override=True)")
     else:
         # No accidental loading from random cwd .env in production runs.
         log.warning(f"Env file not found at {ENV_PATH}; relying on process environment only")
@@ -163,6 +163,10 @@ def _is_placeholder_value(value: str) -> bool:
         "",
         "your_api_key_here",
         "your_api_secret_here",
+        "your_paper_key",
+        "your_paper_secret",
+        "your_key",
+        "your_secret",
         "changeme",
         "replace_me",
         "<redacted>",
@@ -207,6 +211,19 @@ def validate_startup_config() -> dict[str, Any]:
         "api_secret": api_secret,
         "paper_mode": paper_mode,
     }
+
+
+def log_credential_presence(config: dict[str, Any]) -> None:
+    """Log non-sensitive credential diagnostics for startup visibility."""
+    api_key = config["api_key"]
+    api_secret = config["api_secret"]
+    key_suffix = api_key[-4:] if len(api_key) >= 4 else "****"
+    secret_len = len(api_secret)
+    log.info(
+        "Credential check passed | key_suffix=***%s | secret_length=%d",
+        key_suffix,
+        secret_len,
+    )
 
 
 def now_utc() -> datetime:
@@ -1559,6 +1576,7 @@ def run_bot() -> None:
     log.info("=" * 60)
 
     config = validate_startup_config()
+    log_credential_presence(config)
     trading_client, data_client = create_clients(config)
 
     account = retry_api_call(trading_client.get_account)
