@@ -103,6 +103,7 @@ SHORT_RSI_MAX = 60               # Short entry: RSI ceiling
 MAX_RETRIES = 3
 RETRY_DELAY_BASE = 2
 RETRY_DELAY_MAX_SECONDS = 20
+BARS_FETCH_LOOKBACK_DAYS = 500
 
 # End-of-day flattening (4:00 PM ET = 21:00 UTC during regular market hours)
 EOD_FLATTEN_UTC_HOUR = 20
@@ -128,6 +129,8 @@ def setup_logging():
         ch.setFormatter(fmt)
         logger.addHandler(fh)
         logger.addHandler(ch)
+    logging.getLogger("alpaca").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
     return logger
 
 
@@ -143,11 +146,13 @@ def ensure_directories():
 
 
 def load_environment() -> None:
+    """Load environment from config/.env first, then process environment fallback."""
     if ENV_PATH.exists():
-        load_dotenv(str(ENV_PATH))
+        load_dotenv(str(ENV_PATH), override=False)
+        log.info(f"Loaded environment variables from {ENV_PATH}")
     else:
-        load_dotenv()
-        log.warning(f"Env file not found at {ENV_PATH}; relying on process environment")
+        # No accidental loading from random cwd .env in production runs.
+        log.warning(f"Env file not found at {ENV_PATH}; relying on process environment only")
 
 
 
@@ -172,6 +177,36 @@ def get_required_env(*names: str) -> str:
             return value
     aliases = ", ".join(names)
     raise ValueError(f"Missing required environment variable (or placeholder value): {aliases}")
+
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def validate_startup_config() -> dict[str, Any]:
+    """Validate required configuration and critical risk parameter safety bounds."""
+    api_key = get_required_env("ALPACA_KEY", "APCA_API_KEY_ID")
+    api_secret = get_required_env("ALPACA_SECRET", "APCA_API_SECRET_KEY")
+    paper_mode = _parse_bool_env("ALPACA_PAPER", True)
+
+    checks = {
+        "RISK_PER_TRADE": (0 < RISK_PER_TRADE <= 0.05),
+        "MAX_POSITION_PCT": (0 < MAX_POSITION_PCT <= 0.25),
+        "MAX_OPEN_POSITIONS": (MAX_OPEN_POSITIONS >= 1),
+        "MAX_DAILY_LOSS_PCT": (0 < MAX_DAILY_LOSS_PCT <= 0.10),
+    }
+    invalid = [name for name, ok in checks.items() if not ok]
+    if invalid:
+        raise ValueError(f"Invalid risk configuration values: {', '.join(invalid)}")
+
+    return {
+        "api_key": api_key,
+        "api_secret": api_secret,
+        "paper_mode": paper_mode,
+    }
 
 
 def now_utc() -> datetime:
@@ -767,14 +802,24 @@ def position_size_from_atr(
 # API CLIENTS
 # ============================================================
 
-def create_clients() -> tuple[TradingClient, StockHistoricalDataClient]:
-    api_key = get_required_env("ALPACA_KEY", "APCA_API_KEY_ID")
-    api_secret = get_required_env("ALPACA_SECRET", "APCA_API_SECRET_KEY")
-    paper_mode = os.getenv("ALPACA_PAPER", "true").strip().lower() in {"1", "true", "yes", "on"}
+def create_clients(config: dict[str, Any]) -> tuple[TradingClient, StockHistoricalDataClient]:
+    api_key = config["api_key"]
+    api_secret = config["api_secret"]
+    paper_mode = config["paper_mode"]
     trading_client = TradingClient(api_key, api_secret, paper=paper_mode)
     data_client = StockHistoricalDataClient(api_key, api_secret)
     log.info(f"Alpaca client configured | paper={paper_mode}")
     return trading_client, data_client
+
+
+def is_retryable_api_error(error: Exception) -> bool:
+    text = str(error).lower()
+    retryable_markers = [
+        "429", "rate limit", "too many requests",
+        "timeout", "temporarily unavailable",
+        "503", "502", "500", "connection",
+    ]
+    return any(marker in text for marker in retryable_markers)
 
 
 def retry_api_call(
@@ -795,13 +840,17 @@ def retry_api_call(
                     "Check ALPACA_KEY/ALPACA_SECRET (or APCA_API_KEY_ID/APCA_API_SECRET_KEY)."
                 )
                 raise
+            if not is_retryable_api_error(e):
+                log.error(f"Non-retryable API error in {func.__name__}: {e}")
+                raise
             if attempt == max_retries:
-                log.error(f"API call failed after {max_retries + 1} attempts: {e}")
+                log.error(f"API call failed after {max_retries + 1} attempts in {func.__name__}: {e}")
                 raise
             base_delay = RETRY_DELAY_BASE ** (attempt + 1)
             delay = min(RETRY_DELAY_MAX_SECONDS, base_delay + random.uniform(0, 0.5))
             log.warning(
-                f"API call failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                f"Retryable API error in {func.__name__} "
+                f"(attempt {attempt + 1}/{max_retries + 1}): {e}. "
                 f"Retrying in {delay:.1f}s..."
             )
             time.sleep(delay)
@@ -834,7 +883,7 @@ def validate_bars_df(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 def fetch_daily_bars(data_client: StockHistoricalDataClient,
                      symbol: str) -> pd.DataFrame:
-    start_date = datetime.now(timezone.utc) - timedelta(days=500)
+    start_date = datetime.now(timezone.utc) - timedelta(days=BARS_FETCH_LOOKBACK_DAYS)
 
     request = StockBarsRequest(
         symbol_or_symbols=[symbol],
@@ -860,6 +909,20 @@ def fetch_daily_bars(data_client: StockHistoricalDataClient,
 
     log.info(f"{symbol}: fetched {len(df)} daily bars")
     return df
+
+
+def build_symbol_analysis_cache(
+    data_client: StockHistoricalDataClient,
+    symbols: list[str],
+) -> dict[str, pd.DataFrame]:
+    """Fetch + indicator-calculate once per symbol per run."""
+    cache: dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        bars = fetch_daily_bars(data_client, symbol)
+        if bars.empty:
+            continue
+        cache[symbol] = calculate_indicators(bars)
+    return cache
 
 
 # ============================================================
@@ -1027,7 +1090,8 @@ def count_trading_days_held(entry_date_str: str) -> int:
 # ============================================================
 
 def manage_open_positions(trading_client: TradingClient,
-                          data_client: StockHistoricalDataClient) -> None:
+                          data_client: StockHistoricalDataClient,
+                          analysis_cache: dict[str, pd.DataFrame] | None = None) -> None:
     """Manage all open positions with dynamic exit logic (long and short)."""
     open_positions = get_open_positions(trading_client)
     log_data = load_trade_log()
@@ -1039,12 +1103,15 @@ def manage_open_positions(trading_client: TradingClient,
     for symbol, position in open_positions.items():
         try:
             log.info(f"Managing position: {symbol}")
-            bars_df = fetch_daily_bars(data_client, symbol)
+            bars_df = analysis_cache.get(symbol) if analysis_cache else None
+            if bars_df is None:
+                bars_df = fetch_daily_bars(data_client, symbol)
+                if not bars_df.empty:
+                    bars_df = calculate_indicators(bars_df)
             if bars_df.empty:
                 log.warning(f"Skipping {symbol}: no market data")
                 continue
 
-            bars_df = calculate_indicators(bars_df)
             latest = bars_df.iloc[-1]
             current_price = float(latest["close"])
             current_atr = float(latest["atr"]) if not pd.isna(latest.get("atr")) else 0
@@ -1264,7 +1331,8 @@ def manage_open_positions(trading_client: TradingClient,
 # ============================================================
 
 def scan_for_new_entries(trading_client: TradingClient,
-                         data_client: StockHistoricalDataClient) -> None:
+                         data_client: StockHistoricalDataClient,
+                         analysis_cache: dict[str, pd.DataFrame] | None = None) -> None:
     """Scan watchlist for new entry signals."""
     log_data = load_trade_log()
     open_positions = get_open_positions(trading_client)
@@ -1303,12 +1371,14 @@ def scan_for_new_entries(trading_client: TradingClient,
                 log.info(f"{symbol}: SKIP — same-day re-entry blocked")
                 continue
 
-            df = fetch_daily_bars(data_client, symbol)
+            df = analysis_cache.get(symbol) if analysis_cache else None
+            if df is None:
+                raw = fetch_daily_bars(data_client, symbol)
+                df = calculate_indicators(raw) if not raw.empty else raw
             if df.empty:
                 log.info(f"{symbol}: SKIP — no bar data")
                 continue
 
-            df = calculate_indicators(df)
             signal, reason, regime, direction = evaluate_entry(df)
             latest = df.iloc[-1]
 
@@ -1488,7 +1558,8 @@ def run_bot() -> None:
     log.info("Hybrid Regime-Switching Bot v6 — Starting Run")
     log.info("=" * 60)
 
-    trading_client, data_client = create_clients()
+    config = validate_startup_config()
+    trading_client, data_client = create_clients(config)
 
     account = retry_api_call(trading_client.get_account)
     log.info(f"Connected to Alpaca | Status: {account.status}")
@@ -1496,13 +1567,17 @@ def run_bot() -> None:
              f"Buying Power: ${float(account.buying_power):,.2f}")
     log.info("-" * 60)
 
+    symbols_to_prepare = sorted(set(WATCHLIST) | set(get_open_positions(trading_client).keys()))
+    analysis_cache = build_symbol_analysis_cache(data_client, symbols_to_prepare)
+    log.info(f"Prepared market analysis cache for {len(analysis_cache)}/{len(symbols_to_prepare)} symbols")
+
     # Phase 1: Manage existing positions (exits, trailing stops)
     log.info("PHASE 1: Managing open positions...")
-    manage_open_positions(trading_client, data_client)
+    manage_open_positions(trading_client, data_client, analysis_cache)
 
     # Phase 2: Scan for new entries
     log.info("\nPHASE 2: Scanning for new entries...")
-    scan_for_new_entries(trading_client, data_client)
+    scan_for_new_entries(trading_client, data_client, analysis_cache)
 
     # Phase 3: Daily summary + equity curve
     print_daily_summary(trading_client)

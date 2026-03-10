@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import pytest
 import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
@@ -56,3 +57,40 @@ def test_validate_bars_df_rejects_invalid_rows():
     )
     cleaned = main.validate_bars_df(df, "TEST")
     assert len(cleaned) == 1
+
+
+def test_get_required_env_rejects_placeholder(monkeypatch):
+    monkeypatch.setenv("ALPACA_KEY", "your_api_key_here")
+    monkeypatch.setenv("APCA_API_KEY_ID", "")
+    with pytest.raises(ValueError):
+        main.get_required_env("ALPACA_KEY", "APCA_API_KEY_ID")
+
+
+def test_retry_non_retryable_error_raises_immediately():
+    class DummyError(Exception):
+        pass
+
+    calls = {"n": 0}
+
+    def failing_call():
+        calls["n"] += 1
+        raise DummyError("400 bad request")
+
+    with pytest.raises(DummyError):
+        main.retry_api_call(failing_call, max_retries=3)
+    assert calls["n"] == 1
+
+
+def test_retry_retryable_error_retries(monkeypatch):
+    calls = {"n": 0}
+
+    def flaky_call():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("503 service unavailable")
+        return "ok"
+
+    monkeypatch.setattr(main.time, "sleep", lambda _x: None)
+    result = main.retry_api_call(flaky_call, max_retries=3)
+    assert result == "ok"
+    assert calls["n"] == 3
