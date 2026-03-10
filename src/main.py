@@ -70,8 +70,8 @@ ADX_RANGE_THRESHOLD = 20         # ADX < 20 = ranging
 MIN_ATR_PCT = 0.003              # Min ATR/price ratio (0.3%) - skip dead markets
 MAX_ATR_PCT = 0.06               # Max ATR/price ratio (6%) - skip chaos
 
-# Volume filter (lowered from 1.1 — bear markets often see vol_ratios 0.3-0.7)
-VOLUME_CONFIRMATION_MULT = 0.8   # Volume must be > 0.8x 20-day average
+# Volume filter (lowered from 0.8 — afternoon sessions routinely see vol_ratios 0.3-0.7)
+VOLUME_CONFIRMATION_MULT = 0.30  # Volume must be > 0.30x 20-day average
 
 # Indicator periods
 RSI_PERIOD = 14
@@ -464,13 +464,14 @@ def signal_trend_short(df: pd.DataFrame) -> tuple[bool, str]:
     if not has_volume_confirmation(latest):
         return False, f"Volume ratio {latest.get('volume_ratio', 0):.2f} below threshold"
 
-    # 6. Breakdown: close below lowest low of prior 5 bars
-    prior_low = prev_bars["low"].min()
-    if latest["close"] >= prior_low:
-        return False, f"No breakdown — close {latest['close']:.2f} >= prior 5-bar low {prior_low:.2f}"
+    # 6. Breakdown: close below EMA21 AND RSI < 50
+    if latest["close"] >= latest["ema_slow"]:
+        return False, f"No breakdown — close {latest['close']:.2f} >= EMA21 {latest['ema_slow']:.2f}"
+    if latest["rsi"] >= 50:
+        return False, f"No breakdown — RSI {latest['rsi']:.1f} >= 50"
 
     return True, (f"TREND SHORT: ADX={latest['adx']:.1f}, RSI={latest['rsi']:.1f}, "
-                  f"-DI={latest['minus_di']:.1f}, EMA9<21, breakdown below {prior_low:.2f}")
+                  f"-DI={latest['minus_di']:.1f}, EMA9<21, close below EMA21 {latest['ema_slow']:.2f}")
 
 
 def signal_mean_reversion_long(df: pd.DataFrame) -> tuple[bool, str]:
