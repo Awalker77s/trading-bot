@@ -151,11 +151,27 @@ def load_environment() -> None:
 
 
 
-def get_required_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise ValueError(f"Missing required environment variable: {name}")
-    return value
+def _is_placeholder_value(value: str) -> bool:
+    """Detect template/default values that should not be treated as credentials."""
+    normalized = value.strip().lower()
+    return normalized in {
+        "",
+        "your_api_key_here",
+        "your_api_secret_here",
+        "changeme",
+        "replace_me",
+        "<redacted>",
+    }
+
+
+def get_required_env(*names: str) -> str:
+    """Return first non-empty, non-placeholder env var across aliases."""
+    for name in names:
+        value = os.getenv(name)
+        if value and not _is_placeholder_value(value):
+            return value
+    aliases = ", ".join(names)
+    raise ValueError(f"Missing required environment variable (or placeholder value): {aliases}")
 
 
 def now_utc() -> datetime:
@@ -752,8 +768,8 @@ def position_size_from_atr(
 # ============================================================
 
 def create_clients() -> tuple[TradingClient, StockHistoricalDataClient]:
-    api_key = get_required_env("ALPACA_KEY")
-    api_secret = get_required_env("ALPACA_SECRET")
+    api_key = get_required_env("ALPACA_KEY", "APCA_API_KEY_ID")
+    api_secret = get_required_env("ALPACA_SECRET", "APCA_API_SECRET_KEY")
     paper_mode = os.getenv("ALPACA_PAPER", "true").strip().lower() in {"1", "true", "yes", "on"}
     trading_client = TradingClient(api_key, api_secret, paper=paper_mode)
     data_client = StockHistoricalDataClient(api_key, api_secret)
@@ -772,6 +788,13 @@ def retry_api_call(
         try:
             return func(*args, **kwargs)
         except Exception as e:
+            error_text = str(e).lower()
+            if "unauthorized" in error_text or "401" in error_text:
+                log.error(
+                    "Authentication failed while calling Alpaca API. "
+                    "Check ALPACA_KEY/ALPACA_SECRET (or APCA_API_KEY_ID/APCA_API_SECRET_KEY)."
+                )
+                raise
             if attempt == max_retries:
                 log.error(f"API call failed after {max_retries + 1} attempts: {e}")
                 raise
