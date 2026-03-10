@@ -1,13 +1,16 @@
 """
-Hybrid Regime-Switching Trading Bot v5
+Hybrid Regime-Switching Trading Bot v6
 =======================================
-- Trend-following when ADX > 25 (momentum + breakout)
-- Mean-reversion when ADX < 20 (Bollinger Band + RSI)
+- Trend-following LONG when ADX > 25 (momentum + breakout)
+- Trend-following SHORT when ADX > 25 (breakdown + bearish momentum)
+- Mean-reversion long when ADX < 20 (Bollinger Band + RSI)
+- Oversold bounce entries for ranging stocks (RSI < 35)
 - Conservative in neutral zone (ADX 20-25)
 - ATR-based dynamic stops, trailing stops, time stops
 - Volume confirmation on all entries
 - Daily equity curve tracking
 - Max daily drawdown kill switch
+- Bear market capable: short-selling support for downtrending markets
 """
 
 import os
@@ -67,8 +70,8 @@ ADX_RANGE_THRESHOLD = 20         # ADX < 20 = ranging
 MIN_ATR_PCT = 0.003              # Min ATR/price ratio (0.3%) - skip dead markets
 MAX_ATR_PCT = 0.06               # Max ATR/price ratio (6%) - skip chaos
 
-# Volume filter
-VOLUME_CONFIRMATION_MULT = 1.1   # Volume must be > 1.1x 20-day average
+# Volume filter (lowered from 1.1 — bear markets often see vol_ratios 0.3-0.7)
+VOLUME_CONFIRMATION_MULT = 0.8   # Volume must be > 0.8x 20-day average
 
 # Indicator periods
 RSI_PERIOD = 14
@@ -81,6 +84,18 @@ EMA_SLOW = 21
 SMA_TREND = 50
 SMA_LONG = 200
 VOLUME_MA_PERIOD = 20
+
+# Bollinger Band entry distance (widened from 0.5% — was too tight)
+BB_DISTANCE_PCT = 0.02           # Price within 2% of lower/upper BB to qualify
+
+# Mean-reversion volume threshold (lower than trend — less volume in ranging)
+MEAN_REVERSION_VOL_MULT = 0.6   # Lowered from 1.0 for bear market conditions
+
+# Short-selling parameters
+ATR_STOP_MULTIPLIER_SHORT = 2.0  # 2x ATR stop for short trades
+ATR_TARGET_MULTIPLIER_SHORT = 3.5  # 3.5x ATR target for short trades
+SHORT_RSI_MIN = 30               # Short entry: RSI floor (avoid shorting extremes)
+SHORT_RSI_MAX = 60               # Short entry: RSI ceiling
 
 # Retry configuration
 MAX_RETRIES = 3
@@ -401,6 +416,61 @@ def signal_trend_long(df: pd.DataFrame) -> tuple[bool, str]:
                   f"+DI={latest['plus_di']:.1f}, EMA9>21, breakout above {prior_high:.2f}")
 
 
+def signal_trend_short(df: pd.DataFrame) -> tuple[bool, str]:
+    """Trend-following short signal (ADX > 25 regime, bearish).
+
+    Confluence requirements:
+    1. Price < SMA200 (long-term downtrend)
+    2. EMA9 < EMA21 (short-term bearish momentum)
+    3. -DI > +DI (directional strength confirms bearish)
+    4. RSI between SHORT_RSI_MIN-SHORT_RSI_MAX (momentum without oversold)
+    5. Volume confirmation
+    6. Close below prior 5-bar low (breakdown)
+    """
+    if len(df) < SMA_LONG + 5:
+        return False, "Not enough data for short signal"
+
+    latest = df.iloc[-1]
+    prev_bars = df.iloc[-6:-1]
+
+    required = ["close", "ema_fast", "ema_slow", "sma200", "rsi",
+                "adx", "plus_di", "minus_di", "atr"]
+    for field in required:
+        if pd.isna(latest.get(field)):
+            return False, f"Missing indicator: {field}"
+
+    if latest["close"] < MIN_PRICE:
+        return False, "Price below minimum"
+
+    # 1. Long-term downtrend filter
+    if latest["close"] >= latest["sma200"]:
+        return False, "Price above SMA200 — no downtrend for short"
+
+    # 2. Short-term bearish momentum
+    if latest["ema_fast"] >= latest["ema_slow"]:
+        return False, "EMA9 >= EMA21 — no bearish momentum"
+
+    # 3. Directional strength (bears)
+    if latest["minus_di"] <= latest["plus_di"]:
+        return False, "-DI <= +DI — bulls still in control"
+
+    # 4. RSI filter (avoid shorting into oversold)
+    if not (SHORT_RSI_MIN <= latest["rsi"] <= SHORT_RSI_MAX):
+        return False, f"RSI {latest['rsi']:.1f} outside {SHORT_RSI_MIN}-{SHORT_RSI_MAX} range for short"
+
+    # 5. Volume confirmation
+    if not has_volume_confirmation(latest):
+        return False, f"Volume ratio {latest.get('volume_ratio', 0):.2f} below threshold"
+
+    # 6. Breakdown: close below lowest low of prior 5 bars
+    prior_low = prev_bars["low"].min()
+    if latest["close"] >= prior_low:
+        return False, f"No breakdown — close {latest['close']:.2f} >= prior 5-bar low {prior_low:.2f}"
+
+    return True, (f"TREND SHORT: ADX={latest['adx']:.1f}, RSI={latest['rsi']:.1f}, "
+                  f"-DI={latest['minus_di']:.1f}, EMA9<21, breakdown below {prior_low:.2f}")
+
+
 def signal_mean_reversion_long(df: pd.DataFrame) -> tuple[bool, str]:
     """Mean-reversion long signal (ADX < 20 regime).
 
@@ -424,10 +494,10 @@ def signal_mean_reversion_long(df: pd.DataFrame) -> tuple[bool, str]:
     if latest["close"] < MIN_PRICE:
         return False, "Price below minimum"
 
-    # 1. Price near lower BB (within 0.5% of lower band or below it)
+    # 1. Price near lower BB (within BB_DISTANCE_PCT of lower band or below it)
     bb_distance = (latest["close"] - latest["bb_lower"]) / latest["bb_lower"]
-    if bb_distance > 0.005:
-        return False, f"Price not near lower BB (distance={bb_distance:.4f})"
+    if bb_distance > BB_DISTANCE_PCT:
+        return False, f"Price not near lower BB (distance={bb_distance:.4f}, need <{BB_DISTANCE_PCT})"
 
     # 2. RSI oversold
     if latest["rsi"] >= 35:
@@ -437,10 +507,10 @@ def signal_mean_reversion_long(df: pd.DataFrame) -> tuple[bool, str]:
     if latest["close"] <= latest["sma200"] * 0.95:
         return False, "Price too far below SMA200 — potential breakdown"
 
-    # 4. Volume: want elevated volume (capitulation/selling climax)
+    # 4. Volume: want some volume (lowered threshold for bear markets)
     vol_ratio = latest.get("volume_ratio", 0)
-    if vol_ratio < 1.0:
-        return False, f"Volume too low for capitulation ({vol_ratio:.2f})"
+    if vol_ratio < MEAN_REVERSION_VOL_MULT:
+        return False, f"Volume too low for capitulation ({vol_ratio:.2f}, need >={MEAN_REVERSION_VOL_MULT})"
 
     # 5. Bullish candle (close > open = buyers stepping in)
     if latest["close"] <= latest["open"]:
@@ -448,6 +518,58 @@ def signal_mean_reversion_long(df: pd.DataFrame) -> tuple[bool, str]:
 
     return True, (f"MEAN REVERSION LONG: RSI={latest['rsi']:.1f}, "
                   f"BB_dist={bb_distance:.4f}, vol_ratio={vol_ratio:.2f}")
+
+
+def signal_oversold_bounce(df: pd.DataFrame) -> tuple[bool, str]:
+    """Oversold bounce signal for ranging stocks (ADX < 20).
+
+    Lighter requirements than full mean-reversion — catches RSI < 35 bounces
+    in stocks that aren't necessarily at the lower BB but are deeply oversold.
+
+    Confluence requirements:
+    1. RSI < 35 (deeply oversold)
+    2. RSI turned up: current RSI > prior bar RSI (momentum shifting)
+    3. Price > SMA200 * 0.90 (not in freefall — within 10% of SMA200)
+    4. Bullish candle (close > open)
+    5. Minimum volume (not a dead market)
+    """
+    if len(df) < SMA_LONG + 5:
+        return False, "Not enough data for oversold bounce signal"
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    required = ["close", "open", "sma200", "rsi", "atr"]
+    for field in required:
+        if pd.isna(latest.get(field)):
+            return False, f"Missing indicator: {field}"
+
+    if latest["close"] < MIN_PRICE:
+        return False, "Price below minimum"
+
+    # 1. RSI deeply oversold
+    if latest["rsi"] >= 35:
+        return False, f"RSI {latest['rsi']:.1f} not oversold (need < 35)"
+
+    # 2. RSI turning up (momentum shift)
+    if pd.isna(prev.get("rsi")) or latest["rsi"] <= prev["rsi"]:
+        return False, f"RSI not turning up ({latest['rsi']:.1f} vs prior {prev.get('rsi', 0):.1f})"
+
+    # 3. Not in total freefall — within 10% of SMA200
+    if latest["close"] <= latest["sma200"] * 0.90:
+        return False, "Price too far below SMA200 — potential crash, skip bounce"
+
+    # 4. Bullish candle
+    if latest["close"] <= latest["open"]:
+        return False, "No bullish candle — close <= open"
+
+    # 5. Minimum volume
+    vol_ratio = latest.get("volume_ratio", 0)
+    if vol_ratio < MEAN_REVERSION_VOL_MULT:
+        return False, f"Volume too low ({vol_ratio:.2f})"
+
+    return True, (f"OVERSOLD BOUNCE: RSI={latest['rsi']:.1f} (turning up from "
+                  f"{prev['rsi']:.1f}), vol_ratio={vol_ratio:.2f}")
 
 
 def signal_neutral_long(df: pd.DataFrame) -> tuple[bool, str]:
@@ -499,10 +621,12 @@ def signal_neutral_long(df: pd.DataFrame) -> tuple[bool, str]:
                   f"near SMA50, EMA9>21, bullish candle")
 
 
-def evaluate_entry(df: pd.DataFrame) -> tuple[bool, str, str]:
-    """Master entry evaluation. Returns (signal, reason, regime)."""
+def evaluate_entry(df: pd.DataFrame) -> tuple[bool, str, str, str]:
+    """Master entry evaluation. Returns (signal, reason, regime, direction).
+    direction is 'long' or 'short'.
+    """
     if len(df) < SMA_LONG + 5:
-        return False, "Insufficient data", "unknown"
+        return False, "Insufficient data", "unknown", "long"
 
     latest = df.iloc[-1]
     regime = detect_regime(latest)
@@ -510,17 +634,33 @@ def evaluate_entry(df: pd.DataFrame) -> tuple[bool, str, str]:
     # Volatility gate — applies to ALL regimes
     vol_ok, vol_reason = passes_volatility_filter(latest)
     if not vol_ok:
-        return False, vol_reason, regime
+        return False, vol_reason, regime, "long"
 
     if regime == "trending":
+        # Try long first
         signal, reason = signal_trend_long(df)
-        return signal, reason, regime
+        if signal:
+            return True, reason, regime, "long"
+        # Try short if long didn't trigger
+        signal, reason = signal_trend_short(df)
+        if signal:
+            return True, reason, regime, "short"
+        return False, reason, regime, "long"
+
     elif regime == "ranging":
+        # Try mean-reversion long first
         signal, reason = signal_mean_reversion_long(df)
-        return signal, reason, regime
+        if signal:
+            return True, reason, regime, "long"
+        # Try oversold bounce
+        signal, reason = signal_oversold_bounce(df)
+        if signal:
+            return True, reason, regime, "long"
+        return False, reason, regime, "long"
+
     else:
         signal, reason = signal_neutral_long(df)
-        return signal, reason, regime
+        return signal, reason, regime, "long"
 
 
 # ============================================================
@@ -533,11 +673,13 @@ def position_size_from_atr(
     atr: float,
     stop_multiplier: float,
     risk_per_trade: float,
-    max_position_pct: float
+    max_position_pct: float,
+    direction: str = "long"
 ) -> tuple[int, float]:
     """Calculate position size based on ATR stop distance.
 
     Returns (qty, stop_price).
+    For shorts, stop is placed ABOVE entry price.
     """
     stop_distance = atr * stop_multiplier
     if stop_distance <= 0 or entry_price <= 0:
@@ -551,7 +693,10 @@ def position_size_from_atr(
     qty = min(qty, max_qty)
     qty = max(qty, 0)
 
-    stop_price = round(entry_price - stop_distance, 2)
+    if direction == "short":
+        stop_price = round(entry_price + stop_distance, 2)
+    else:
+        stop_price = round(entry_price - stop_distance, 2)
     return qty, stop_price
 
 
@@ -649,6 +794,28 @@ def place_market_sell(trading_client: TradingClient, symbol: str, qty: int):
     return retry_api_call(trading_client.submit_order, order_data=order_data)
 
 
+def place_short_entry(trading_client: TradingClient, symbol: str, qty: int):
+    """Sell short — opens a short position."""
+    order_data = MarketOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.SELL,
+        time_in_force=TimeInForce.DAY
+    )
+    return retry_api_call(trading_client.submit_order, order_data=order_data)
+
+
+def place_short_exit(trading_client: TradingClient, symbol: str, qty: int):
+    """Buy to cover — closes a short position."""
+    order_data = MarketOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY
+    )
+    return retry_api_call(trading_client.submit_order, order_data=order_data)
+
+
 # ============================================================
 # TRADE LOG HELPERS
 # ============================================================
@@ -662,16 +829,25 @@ def find_latest_open_buy(log_data: list, symbol: str) -> dict | None:
     return None
 
 
+def find_latest_open_short(log_data: list, symbol: str) -> dict | None:
+    for entry in reversed(log_data):
+        if (entry.get("symbol") == symbol
+                and entry.get("side") == "SHORT"
+                and not entry.get("closed", False)):
+            return entry
+    return None
+
+
 def has_exited_today(log_data: list, symbol: str) -> bool:
     today = utc_today_str()
     for entry in reversed(log_data):
         if entry.get("symbol") != symbol:
             continue
-        if entry.get("side") == "SELL":
+        if entry.get("side") in ("SELL", "COVER"):
             ts = entry.get("timestamp_utc", "")
             if ts.startswith(today):
                 return True
-        if (entry.get("side") == "BUY" and entry.get("closed")
+        if (entry.get("side") in ("BUY", "SHORT") and entry.get("closed")
                 and entry.get("exit")):
             exit_ts = entry["exit"].get("timestamp_utc", "")
             if exit_ts.startswith(today):
@@ -683,7 +859,7 @@ def get_realized_pnl_today(log_data: list) -> float:
     today = utc_today_str()
     realized = 0.0
     for entry in log_data:
-        if entry.get("side") == "SELL":
+        if entry.get("side") in ("SELL", "COVER"):
             ts = entry.get("timestamp_utc", "")
             if ts.startswith(today):
                 realized += float(entry.get("realized_pnl", 0.0))
@@ -698,9 +874,12 @@ def daily_loss_limit_hit(log_data: list,
     return hit, realized_today, loss_limit_dollars
 
 
-def calculate_realized_pnl(buy_entry: dict, exit_price: float,
+def calculate_realized_pnl(trade_entry: dict, exit_price: float,
                            qty: int) -> float:
-    entry_price = float(buy_entry["entry_reference_price"])
+    entry_price = float(trade_entry["entry_reference_price"])
+    direction = trade_entry.get("direction", "long")
+    if direction == "short":
+        return round((entry_price - exit_price) * qty, 2)
     return round((exit_price - entry_price) * qty, 2)
 
 
@@ -734,7 +913,7 @@ def count_trading_days_held(entry_date_str: str) -> int:
 
 def manage_open_positions(trading_client: TradingClient,
                           data_client: StockHistoricalDataClient) -> None:
-    """Manage all open positions with dynamic exit logic."""
+    """Manage all open positions with dynamic exit logic (long and short)."""
     open_positions = get_open_positions(trading_client)
     log_data = load_trade_log()
 
@@ -754,73 +933,110 @@ def manage_open_positions(trading_client: TradingClient,
             latest = bars_df.iloc[-1]
             current_price = float(latest["close"])
             current_atr = float(latest["atr"]) if not pd.isna(latest.get("atr")) else 0
-            qty = int(float(position.qty))
+            qty = abs(int(float(position.qty)))
 
-            buy_entry = find_latest_open_buy(log_data, symbol)
-            if not buy_entry:
-                log.warning(f"No matching BUY log for {symbol}; skipping")
-                continue
+            # Determine if this is a long or short position
+            # Alpaca: negative qty = short position
+            is_short = float(position.qty) < 0
 
-            entry_price = float(buy_entry["entry_reference_price"])
-            original_stop = float(buy_entry["stop_loss_price"])
-            take_profit_price = float(buy_entry["take_profit_price"])
-            entry_atr = float(buy_entry.get("entry_atr", current_atr))
-
-            # Calculate R-multiple (how many R's of profit)
-            stop_distance = entry_price - original_stop
-            if stop_distance > 0:
-                r_multiple = (current_price - entry_price) / stop_distance
+            if is_short:
+                trade_entry = find_latest_open_short(log_data, symbol)
+                if not trade_entry:
+                    log.warning(f"No matching SHORT log for {symbol}; skipping")
+                    continue
             else:
-                r_multiple = 0
+                trade_entry = find_latest_open_buy(log_data, symbol)
+                if not trade_entry:
+                    log.warning(f"No matching BUY log for {symbol}; skipping")
+                    continue
+
+            entry_price = float(trade_entry["entry_reference_price"])
+            original_stop = float(trade_entry["stop_loss_price"])
+            take_profit_price = float(trade_entry["take_profit_price"])
+            direction = trade_entry.get("direction", "long")
+
+            # Calculate R-multiple
+            if is_short:
+                stop_distance = original_stop - entry_price
+                if stop_distance > 0:
+                    r_multiple = (entry_price - current_price) / stop_distance
+                else:
+                    r_multiple = 0
+            else:
+                stop_distance = entry_price - original_stop
+                if stop_distance > 0:
+                    r_multiple = (current_price - entry_price) / stop_distance
+                else:
+                    r_multiple = 0
 
             # --- Determine effective stop ---
             effective_stop = original_stop
 
-            # Trailing stop: if profit > 1R, trail at 2.5x current ATR
-            if r_multiple >= TRAILING_ACTIVATION_R and current_atr > 0:
-                trailing_stop = current_price - (TRAILING_ATR_MULTIPLIER * current_atr)
-                # Trailing stop only ratchets UP, never down
-                effective_stop = max(effective_stop, trailing_stop)
-                # Also move stop to at least breakeven once 1R is hit
-                effective_stop = max(effective_stop, entry_price)
+            if is_short:
+                # Short trailing stop: ratchets DOWN
+                if r_multiple >= TRAILING_ACTIVATION_R and current_atr > 0:
+                    trailing_stop = current_price + (TRAILING_ATR_MULTIPLIER * current_atr)
+                    effective_stop = min(effective_stop, trailing_stop)
+                    # Move stop to at least breakeven
+                    effective_stop = min(effective_stop, entry_price)
+            else:
+                # Long trailing stop: ratchets UP
+                if r_multiple >= TRAILING_ACTIVATION_R and current_atr > 0:
+                    trailing_stop = current_price - (TRAILING_ATR_MULTIPLIER * current_atr)
+                    effective_stop = max(effective_stop, trailing_stop)
+                    effective_stop = max(effective_stop, entry_price)
 
             # --- Check exit conditions ---
             exit_reason = None
             exit_qty = qty
 
-            # 1. Stop loss (static or trailing)
-            if current_price <= effective_stop:
-                if r_multiple >= TRAILING_ACTIVATION_R:
-                    exit_reason = "TRAILING_STOP"
-                else:
-                    exit_reason = "STOP_LOSS"
+            if is_short:
+                # Short: stop is above entry, take profit below
+                if current_price >= effective_stop:
+                    if r_multiple >= TRAILING_ACTIVATION_R:
+                        exit_reason = "TRAILING_STOP"
+                    else:
+                        exit_reason = "STOP_LOSS"
+                elif current_price <= take_profit_price:
+                    exit_reason = "TAKE_PROFIT"
+            else:
+                # Long: stop is below entry, take profit above
+                if current_price <= effective_stop:
+                    if r_multiple >= TRAILING_ACTIVATION_R:
+                        exit_reason = "TRAILING_STOP"
+                    else:
+                        exit_reason = "STOP_LOSS"
+                elif current_price >= take_profit_price:
+                    exit_reason = "TAKE_PROFIT"
 
-            # 2. Take profit target
-            elif current_price >= take_profit_price:
-                exit_reason = "TAKE_PROFIT"
-
-            # 3. Time stop
-            elif not exit_reason:
-                entry_ts = buy_entry.get("timestamp_utc", "")
+            # Time stop (both directions)
+            if not exit_reason:
+                entry_ts = trade_entry.get("timestamp_utc", "")
                 days_held = count_trading_days_held(entry_ts)
                 if days_held >= MAX_HOLD_DAYS and r_multiple < TRAILING_ACTIVATION_R:
                     exit_reason = f"TIME_STOP ({days_held} days)"
 
-            # 4. Regime change exit — if regime shifted to ranging and we're
-            #    in a trend trade with minimal profit, tighten stop
+            # Regime change exit
             regime = detect_regime(latest)
-            trade_regime = buy_entry.get("regime", "unknown")
+            trade_regime = trade_entry.get("regime", "unknown")
             if (trade_regime == "trending" and regime == "ranging"
                     and r_multiple < 0.5 and not exit_reason):
-                # Tighten stop to 1 ATR
-                tight_stop = current_price - current_atr
-                if current_price <= tight_stop or tight_stop > effective_stop:
-                    effective_stop = max(effective_stop, tight_stop)
-                    if current_price <= effective_stop:
-                        exit_reason = "REGIME_CHANGE_EXIT"
+                if is_short:
+                    tight_stop = current_price + current_atr
+                    if current_price >= tight_stop or tight_stop < effective_stop:
+                        effective_stop = min(effective_stop, tight_stop)
+                        if current_price >= effective_stop:
+                            exit_reason = "REGIME_CHANGE_EXIT"
+                else:
+                    tight_stop = current_price - current_atr
+                    if current_price <= tight_stop or tight_stop > effective_stop:
+                        effective_stop = max(effective_stop, tight_stop)
+                        if current_price <= effective_stop:
+                            exit_reason = "REGIME_CHANGE_EXIT"
 
+            dir_label = "SHORT" if is_short else "LONG"
             log.info(
-                f"{symbol}: price={current_price:.2f}, "
+                f"{symbol} [{dir_label}]: price={current_price:.2f}, "
                 f"entry={entry_price:.2f}, stop={effective_stop:.2f}, "
                 f"target={take_profit_price:.2f}, R={r_multiple:.2f}, "
                 f"regime={regime}"
@@ -828,11 +1044,14 @@ def manage_open_positions(trading_client: TradingClient,
 
             if not exit_reason:
                 log.info(f"{symbol}: HOLD (R={r_multiple:.2f})")
-                # Update the trailing stop in the log for next check
-                if effective_stop > original_stop:
+                # Update the trailing stop in the log
+                stop_changed = (effective_stop > original_stop if not is_short
+                                else effective_stop < original_stop)
+                if stop_changed:
+                    entry_side = "SHORT" if is_short else "BUY"
                     for entry in reversed(log_data):
-                        if (entry.get("order_id") == buy_entry["order_id"]
-                                and entry.get("side") == "BUY"
+                        if (entry.get("order_id") == trade_entry["order_id"]
+                                and entry.get("side") == entry_side
                                 and not entry.get("closed", False)):
                             entry["stop_loss_price"] = round(effective_stop, 2)
                             break
@@ -840,60 +1059,68 @@ def manage_open_positions(trading_client: TradingClient,
                 continue
 
             log.info(f"{symbol}: EXIT -> {exit_reason} (qty={exit_qty})")
-            sell_order = place_market_sell(trading_client, symbol, exit_qty)
 
-            realized_pnl = calculate_realized_pnl(buy_entry, current_price,
+            if is_short:
+                close_order = place_short_exit(trading_client, symbol, exit_qty)
+                exit_side = "COVER"
+            else:
+                close_order = place_market_sell(trading_client, symbol, exit_qty)
+                exit_side = "SELL"
+
+            realized_pnl = calculate_realized_pnl(trade_entry, current_price,
                                                   exit_qty)
 
             exit_info = {
                 "timestamp_utc": now_utc_iso(),
                 "reason": exit_reason,
                 "exit_reference_price": current_price,
-                "sell_order_id": str(sell_order.id),
+                "sell_order_id": str(close_order.id),
                 "qty": exit_qty,
                 "realized_pnl": realized_pnl,
                 "result": win_or_loss(realized_pnl),
                 "r_multiple": round(r_multiple, 2),
                 "days_held": count_trading_days_held(
-                    buy_entry.get("timestamp_utc", "")),
+                    trade_entry.get("timestamp_utc", "")),
                 "exit_regime": regime,
             }
 
+            entry_side = "SHORT" if is_short else "BUY"
             for entry in reversed(log_data):
-                if (entry.get("order_id") == buy_entry["order_id"]
-                        and entry.get("side") == "BUY"
+                if (entry.get("order_id") == trade_entry["order_id"]
+                        and entry.get("side") == entry_side
                         and not entry.get("closed", False)):
                     entry["closed"] = True
                     entry["exit"] = exit_info
                     break
 
-            sell_log = {
+            exit_log = {
                 "timestamp_utc": now_utc_iso(),
                 "trade_date": utc_today_str(),
                 "symbol": symbol,
-                "side": "SELL",
+                "side": exit_side,
+                "direction": direction,
                 "qty": exit_qty,
                 "entry_reference_price": entry_price,
                 "exit_reference_price": current_price,
                 "realized_pnl": realized_pnl,
                 "result": win_or_loss(realized_pnl),
                 "r_multiple": round(r_multiple, 2),
-                "strategy": "hybrid_regime_v5",
-                "order_id": str(sell_order.id),
+                "strategy": "hybrid_regime_v6",
+                "order_id": str(close_order.id),
                 "notes": {
                     "reason": exit_reason,
-                    "linked_buy_order_id": buy_entry["order_id"],
+                    "linked_entry_order_id": trade_entry["order_id"],
                     "days_held": count_trading_days_held(
-                        buy_entry.get("timestamp_utc", "")),
+                        trade_entry.get("timestamp_utc", "")),
                     "exit_atr": round(current_atr, 4),
                     "exit_regime": regime,
                 }
             }
-            log_data.append(sell_log)
+            log_data.append(exit_log)
             save_trade_log(log_data)
 
             log.info(
-                f"{symbol}: SOLD | Order: {sell_order.id} | "
+                f"{symbol}: {exit_side} | Order: {close_order.id} | "
                 f"P/L: ${realized_pnl:.2f} | R: {r_multiple:.2f} | "
                 f"Reason: {exit_reason}"
             )
@@ -952,12 +1179,13 @@ def scan_for_new_entries(trading_client: TradingClient,
                 continue
 
             df = calculate_indicators(df)
-            signal, reason, regime = evaluate_entry(df)
+            signal, reason, regime, direction = evaluate_entry(df)
             latest = df.iloc[-1]
 
             # Log the analysis for every symbol
             log.info(
-                f"{symbol}: regime={regime}, signal={signal} | {reason} | "
+                f"{symbol}: regime={regime}, direction={direction}, "
+                f"signal={signal} | {reason} | "
                 f"close={latest['close']:.2f}, ADX={latest.get('adx', 0):.1f}, "
                 f"RSI={latest.get('rsi', 0):.1f}, "
                 f"ATR={latest.get('atr', 0):.2f}, "
@@ -970,8 +1198,11 @@ def scan_for_new_entries(trading_client: TradingClient,
             entry_price = float(latest["close"])
             current_atr = float(latest["atr"])
 
-            # Determine stop/target multipliers based on regime
-            if regime == "trending":
+            # Determine stop/target multipliers based on regime and direction
+            if direction == "short":
+                stop_mult = ATR_STOP_MULTIPLIER_SHORT
+                target_mult = ATR_TARGET_MULTIPLIER_SHORT
+            elif regime == "trending":
                 stop_mult = ATR_STOP_MULTIPLIER_TREND
                 target_mult = ATR_TARGET_MULTIPLIER_TREND
             elif regime == "ranging":
@@ -987,30 +1218,42 @@ def scan_for_new_entries(trading_client: TradingClient,
                 atr=current_atr,
                 stop_multiplier=stop_mult,
                 risk_per_trade=RISK_PER_TRADE,
-                max_position_pct=MAX_POSITION_PCT
+                max_position_pct=MAX_POSITION_PCT,
+                direction=direction
             )
 
             if qty < 1:
                 log.info(f"{symbol}: SKIP — calculated qty < 1")
                 continue
 
-            take_profit_price = round(entry_price + (current_atr * target_mult), 2)
+            # Target price depends on direction
+            if direction == "short":
+                take_profit_price = round(entry_price - (current_atr * target_mult), 2)
+            else:
+                take_profit_price = round(entry_price + (current_atr * target_mult), 2)
             estimated_value = qty * entry_price
 
+            dir_label = "SHORT" if direction == "short" else "LONG"
             log.info(
-                f"{symbol}: ENTRY SIGNAL — qty={qty}, "
+                f"{symbol}: {dir_label} ENTRY SIGNAL — qty={qty}, "
                 f"value=${estimated_value:.2f}, "
                 f"stop={stop_price:.2f}, target={take_profit_price:.2f}, "
                 f"regime={regime}"
             )
 
-            order = place_market_buy(trading_client, symbol, qty)
+            if direction == "short":
+                order = place_short_entry(trading_client, symbol, qty)
+                log_side = "SHORT"
+            else:
+                order = place_market_buy(trading_client, symbol, qty)
+                log_side = "BUY"
 
             log_entry = {
                 "timestamp_utc": now_utc_iso(),
                 "trade_date": utc_today_str(),
                 "symbol": symbol,
-                "side": "BUY",
+                "side": log_side,
+                "direction": direction,
                 "qty": qty,
                 "entry_reference_price": entry_price,
                 "estimated_position_value": estimated_value,
@@ -1019,7 +1262,7 @@ def scan_for_new_entries(trading_client: TradingClient,
                 "take_profit_price": take_profit_price,
                 "entry_atr": round(current_atr, 4),
                 "regime": regime,
-                "strategy": "hybrid_regime_v5",
+                "strategy": "hybrid_regime_v6",
                 "order_id": str(order.id),
                 "closed": False,
                 "notes": {
@@ -1044,7 +1287,7 @@ def scan_for_new_entries(trading_client: TradingClient,
             }
             append_trade_log(log_entry)
 
-            log.info(f"{symbol}: ORDER PLACED | ID: {order.id}")
+            log.info(f"{symbol}: {dir_label} ORDER PLACED | ID: {order.id}")
             entries_this_run += 1
 
         except Exception as e:
@@ -1066,7 +1309,7 @@ def print_daily_summary(trading_client: TradingClient) -> None:
     today = utc_today_str()
     today_sells = [
         x for x in log_data
-        if x.get("side") == "SELL"
+        if x.get("side") in ("SELL", "COVER")
         and x.get("timestamp_utc", "").startswith(today)
     ]
 
@@ -1111,7 +1354,7 @@ def run_bot() -> None:
     load_environment()
 
     log.info("=" * 60)
-    log.info("Hybrid Regime-Switching Bot v5 — Starting Run")
+    log.info("Hybrid Regime-Switching Bot v6 — Starting Run")
     log.info("=" * 60)
 
     trading_client, data_client = create_clients()
