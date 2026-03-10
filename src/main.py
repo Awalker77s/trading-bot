@@ -101,6 +101,10 @@ SHORT_RSI_MAX = 60               # Short entry: RSI ceiling
 MAX_RETRIES = 3
 RETRY_DELAY_BASE = 2
 
+# End-of-day flattening (4:00 PM ET = 21:00 UTC during regular market hours)
+EOD_FLATTEN_UTC_HOUR = 20
+EOD_FLATTEN_UTC_MINUTE = 55
+
 
 # ============================================================
 # LOGGING SETUP
@@ -152,6 +156,24 @@ def now_utc() -> datetime:
 
 def now_utc_iso() -> str:
     return now_utc().isoformat()
+
+
+def is_eod_flatten_window(current_time: datetime | None = None) -> bool:
+    """Return True when positions should be flattened before the close."""
+    if current_time is None:
+        current_time = now_utc()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    else:
+        current_time = current_time.astimezone(timezone.utc)
+
+    flatten_time = current_time.replace(
+        hour=EOD_FLATTEN_UTC_HOUR,
+        minute=EOD_FLATTEN_UTC_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    return current_time >= flatten_time
 
 
 def utc_today_str() -> str:
@@ -820,6 +842,27 @@ def place_short_exit(trading_client: TradingClient, symbol: str, qty: int):
     return retry_api_call(trading_client.submit_order, order_data=order_data)
 
 
+def submit_position_close_order(trading_client: TradingClient,
+                                symbol: str,
+                                qty: int,
+                                is_short: bool,
+                                reason: str):
+    """Submit closing market order and log the exact payload used."""
+    side = OrderSide.BUY if is_short else OrderSide.SELL
+    side_label = "BUY (cover short)" if is_short else "SELL (close long)"
+    order_data = MarketOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=side,
+        time_in_force=TimeInForce.DAY
+    )
+    log.info(
+        f"{symbol}: SUBMIT CLOSE ORDER | reason={reason} | "
+        f"order={{type=market, side={side_label}, qty={qty}, tif=DAY}}"
+    )
+    return retry_api_call(trading_client.submit_order, order_data=order_data)
+
+
 # ============================================================
 # TRADE LOG HELPERS
 # ============================================================
@@ -994,6 +1037,9 @@ def manage_open_positions(trading_client: TradingClient,
             exit_reason = None
             exit_qty = qty
 
+            if is_eod_flatten_window():
+                exit_reason = "EOD_FLATTEN_BEFORE_CLOSE"
+
             if is_short:
                 # Short: stop is above entry, take profit below
                 if current_price >= effective_stop:
@@ -1065,10 +1111,22 @@ def manage_open_positions(trading_client: TradingClient,
             log.info(f"{symbol}: EXIT -> {exit_reason} (qty={exit_qty})")
 
             if is_short:
-                close_order = place_short_exit(trading_client, symbol, exit_qty)
+                close_order = submit_position_close_order(
+                    trading_client=trading_client,
+                    symbol=symbol,
+                    qty=exit_qty,
+                    is_short=True,
+                    reason=exit_reason,
+                )
                 exit_side = "COVER"
             else:
-                close_order = place_market_sell(trading_client, symbol, exit_qty)
+                close_order = submit_position_close_order(
+                    trading_client=trading_client,
+                    symbol=symbol,
+                    qty=exit_qty,
+                    is_short=False,
+                    reason=exit_reason,
+                )
                 exit_side = "SELL"
 
             realized_pnl = calculate_realized_pnl(trade_entry, current_price,
