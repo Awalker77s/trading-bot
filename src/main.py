@@ -4,7 +4,7 @@ Hybrid Regime-Switching Trading Bot v6
 - Trend-following LONG when ADX > 25 (momentum + breakout)
 - Trend-following SHORT when ADX > 25 (breakdown + bearish momentum)
 - Mean-reversion long when ADX < 20 (Bollinger Band + RSI)
-- Oversold bounce entries for ranging stocks (RSI < 35)
+- Oversold bounce entries for ranging stocks (RSI < 45)
 - Conservative in neutral zone (ADX 20-25)
 - ATR-based dynamic stops, trailing stops, time stops
 - Volume confirmation on all entries
@@ -420,8 +420,8 @@ def signal_trend_short(df: pd.DataFrame) -> tuple[bool, str]:
     """Trend-following short signal (ADX > 25 regime, bearish).
 
     Confluence requirements:
-    1. Price < SMA200 (long-term downtrend)
-    2. EMA9 < EMA21 (short-term bearish momentum)
+    1. EMA9 < EMA21 (bearish momentum — primary downtrend filter)
+    2. Price below recent 10-bar swing high (confirms downtrend structure)
     3. -DI > +DI (directional strength confirms bearish)
     4. RSI between SHORT_RSI_MIN-SHORT_RSI_MAX (momentum without oversold)
     5. Volume confirmation
@@ -442,13 +442,15 @@ def signal_trend_short(df: pd.DataFrame) -> tuple[bool, str]:
     if latest["close"] < MIN_PRICE:
         return False, "Price below minimum"
 
-    # 1. Long-term downtrend filter
-    if latest["close"] >= latest["sma200"]:
-        return False, "Price above SMA200 — no downtrend for short"
-
-    # 2. Short-term bearish momentum
+    # 1. Bearish momentum: EMA9 < EMA21 (primary downtrend filter)
     if latest["ema_fast"] >= latest["ema_slow"]:
-        return False, "EMA9 >= EMA21 — no bearish momentum"
+        return False, "EMA9 >= EMA21 — no bearish momentum for short"
+
+    # 2. Price below recent swing high (10-bar high confirms downtrend structure)
+    swing_bars = df.iloc[-11:-1]  # prior 10 bars
+    recent_swing_high = swing_bars["high"].max()
+    if latest["close"] >= recent_swing_high:
+        return False, f"Price {latest['close']:.2f} >= swing high {recent_swing_high:.2f} — not in downtrend"
 
     # 3. Directional strength (bears)
     if latest["minus_di"] <= latest["plus_di"]:
@@ -476,7 +478,7 @@ def signal_mean_reversion_long(df: pd.DataFrame) -> tuple[bool, str]:
 
     Confluence requirements:
     1. Price near or below lower Bollinger Band
-    2. RSI < 35 (oversold)
+    2. RSI < 45 (oversold for ranging regime)
     3. Price > SMA200 (only mean-revert in uptrend context)
     4. Volume confirmation (capitulation volume)
     5. Bounce: current close > current open (bullish candle)
@@ -499,9 +501,9 @@ def signal_mean_reversion_long(df: pd.DataFrame) -> tuple[bool, str]:
     if bb_distance > BB_DISTANCE_PCT:
         return False, f"Price not near lower BB (distance={bb_distance:.4f}, need <{BB_DISTANCE_PCT})"
 
-    # 2. RSI oversold
-    if latest["rsi"] >= 35:
-        return False, f"RSI {latest['rsi']:.1f} not oversold (need < 35)"
+    # 2. RSI oversold (45 threshold catches more mean-reversion opportunities in ranging markets)
+    if latest["rsi"] >= 45:
+        return False, f"RSI {latest['rsi']:.1f} not oversold (need < 45)"
 
     # 3. Long-term context: only buy dips in uptrend
     if latest["close"] <= latest["sma200"] * 0.95:
@@ -527,7 +529,7 @@ def signal_oversold_bounce(df: pd.DataFrame) -> tuple[bool, str]:
     in stocks that aren't necessarily at the lower BB but are deeply oversold.
 
     Confluence requirements:
-    1. RSI < 35 (deeply oversold)
+    1. RSI < 45 (oversold for ranging regime)
     2. RSI turned up: current RSI > prior bar RSI (momentum shifting)
     3. Price > SMA200 * 0.90 (not in freefall — within 10% of SMA200)
     4. Bullish candle (close > open)
@@ -547,9 +549,9 @@ def signal_oversold_bounce(df: pd.DataFrame) -> tuple[bool, str]:
     if latest["close"] < MIN_PRICE:
         return False, "Price below minimum"
 
-    # 1. RSI deeply oversold
-    if latest["rsi"] >= 35:
-        return False, f"RSI {latest['rsi']:.1f} not oversold (need < 35)"
+    # 1. RSI oversold (45 threshold for ranging markets)
+    if latest["rsi"] >= 45:
+        return False, f"RSI {latest['rsi']:.1f} not oversold (need < 45)"
 
     # 2. RSI turning up (momentum shift)
     if pd.isna(prev.get("rsi")) or latest["rsi"] <= prev["rsi"]:
@@ -637,15 +639,26 @@ def evaluate_entry(df: pd.DataFrame) -> tuple[bool, str, str, str]:
         return False, vol_reason, regime, "long"
 
     if regime == "trending":
-        # Try long first
-        signal, reason = signal_trend_long(df)
-        if signal:
-            return True, reason, regime, "long"
-        # Try short if long didn't trigger
-        signal, reason = signal_trend_short(df)
-        if signal:
-            return True, reason, regime, "short"
-        return False, reason, regime, "long"
+        # Determine bias from EMA crossover for correct direction reporting
+        ema_bearish = latest.get("ema_fast", 0) < latest.get("ema_slow", 0)
+        if ema_bearish:
+            # Bearish bias — try short first
+            signal, reason = signal_trend_short(df)
+            if signal:
+                return True, reason, regime, "short"
+            signal, reason = signal_trend_long(df)
+            if signal:
+                return True, reason, regime, "long"
+            return False, reason, regime, "short"
+        else:
+            # Bullish bias — try long first
+            signal, reason = signal_trend_long(df)
+            if signal:
+                return True, reason, regime, "long"
+            signal, reason = signal_trend_short(df)
+            if signal:
+                return True, reason, regime, "short"
+            return False, reason, regime, "long"
 
     elif regime == "ranging":
         # Try mean-reversion long first
@@ -1379,5 +1392,79 @@ def run_bot() -> None:
     log.info("Run complete.\n")
 
 
+def test_entry_signals():
+    """Test entry signal evaluation with synthetic data for TSLA and GOOG.
+
+    Generates realistic downtrending price data to verify that:
+    - Short entries trigger when EMA9 < EMA21 + price below swing high
+    - Direction field correctly shows 'short' for downtrending stocks
+    - RSI < 45 threshold works for ranging regime longs
+    """
+    print("=" * 60)
+    print("ENTRY SIGNAL TEST — Synthetic Data")
+    print("=" * 60)
+
+    np.random.seed(42)
+
+    for symbol, start_price, trend in [("TSLA", 280.0, "down"), ("GOOG", 170.0, "down")]:
+        n_bars = 250
+        dates = pd.bdate_range(end=pd.Timestamp.today(), periods=n_bars)
+
+        # Generate downtrending OHLCV
+        prices = [start_price]
+        for i in range(1, n_bars):
+            # Downtrend: -0.15% drift with noise
+            daily_return = -0.0015 + np.random.normal(0, 0.015)
+            prices.append(prices[-1] * (1 + daily_return))
+
+        closes = np.array(prices)
+        highs = closes * (1 + np.abs(np.random.normal(0.005, 0.003, n_bars)))
+        lows = closes * (1 - np.abs(np.random.normal(0.005, 0.003, n_bars)))
+        opens = closes * (1 + np.random.normal(0, 0.003, n_bars))
+        volumes = np.random.randint(5_000_000, 30_000_000, n_bars).astype(float)
+
+        df = pd.DataFrame({
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes,
+        }, index=dates)
+
+        df = calculate_indicators(df)
+        signal, reason, regime, direction = evaluate_entry(df)
+        latest = df.iloc[-1]
+
+        print(f"\n{'─' * 50}")
+        print(f"  {symbol} (synthetic {trend}trend)")
+        print(f"{'─' * 50}")
+        print(f"  Close:       {latest['close']:.2f}")
+        print(f"  EMA9:        {latest['ema_fast']:.2f}")
+        print(f"  EMA21:       {latest['ema_slow']:.2f}")
+        print(f"  SMA200:      {latest['sma200']:.2f}")
+        print(f"  ADX:         {latest['adx']:.1f}")
+        print(f"  RSI:         {latest['rsi']:.1f}")
+        print(f"  +DI:         {latest['plus_di']:.1f}")
+        print(f"  -DI:         {latest['minus_di']:.1f}")
+        print(f"  Vol Ratio:   {latest['volume_ratio']:.2f}")
+        print(f"  Regime:      {regime}")
+        print(f"  Direction:   {direction}")
+        print(f"  Signal:      {signal}")
+        print(f"  Reason:      {reason}")
+
+        if signal:
+            print(f"  >>> ENTRY WOULD TRIGGER: {direction.upper()} on {symbol}")
+        else:
+            print(f"  >>> No entry (reason above)")
+
+    print(f"\n{'=' * 60}")
+    print("Test complete.")
+    print("=" * 60)
+
+
 if __name__ == "__main__":
-    run_bot()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--test-signals":
+        test_entry_signals()
+    else:
+        run_bot()
