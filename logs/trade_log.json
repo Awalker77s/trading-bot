@@ -1,0 +1,22 @@
+[
+  {
+    "timestamp_utc": "2026-03-10T13:54:45.490952+00:00",
+    "symbol": "QQQ",
+    "side": "BUY",
+    "qty": 82,
+    "entry_reference_price": 608.75,
+    "estimated_position_value": 49917.5,
+    "stop_loss_price": 602.66,
+    "take_profit_price": 620.92,
+    "strategy": "trend_pullback_momentum_v1",
+    "order_id": "612d5874-f9bc-45d3-8087-c08500f40a04",
+    "notes": {
+      "reason": "Long signal detected",
+      "close": 608.75,
+      "sma20": 606.7295,
+      "sma50": 614.662,
+      "sma200": 589.7365,
+      "rsi14": 51.942257217847796
+    }
+  }
+]

@@ -1,0 +1,222 @@
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 99821.3
+Buying Power: 149939.94
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=606.21, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=675.47, SMA20=684.38, SMA50=687.56, SMA200=657.33, RSI14=41.60
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=258.72, SMA20=264.86, SMA50=263.74, SMA200=244.72, RSI14=42.75
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=403.05, SMA20=401.06, SMA50=434.51, SMA200=484.06, RSI14=52.54
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=182.66, SMA20=185.65, SMA50=185.76, SMA200=176.63, RSI14=44.40
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 99834.42
+Buying Power: 149953.06
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=606.35, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=675.53, SMA20=684.38, SMA50=687.56, SMA200=657.33, RSI14=41.64
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=259.13, SMA20=264.88, SMA50=263.74, SMA200=244.73, RSI14=43.21
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=404.12, SMA20=401.12, SMA50=434.53, SMA200=484.07, RSI14=53.39
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=183.13, SMA20=185.68, SMA50=185.77, SMA200=176.63, RSI14=44.94
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 100007.73
+Buying Power: 150126.37
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=608.12, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=677.62, SMA20=684.49, SMA50=687.60, SMA200=657.34, RSI14=43.04
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=259.96, SMA20=264.92, SMA50=263.76, SMA200=244.73, RSI14=44.19
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=404.41, SMA20=401.13, SMA50=434.53, SMA200=484.07, RSI14=53.62
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=184.05, SMA20=185.72, SMA50=185.78, SMA200=176.64, RSI14=45.98
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 100207.52
+Buying Power: 150326.16
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=610.87, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=680.47, SMA20=684.63, SMA50=687.66, SMA200=657.36, RSI14=45.44
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=261.47, SMA20=264.99, SMA50=263.79, SMA200=244.74, RSI14=46.33
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=405.90, SMA20=401.21, SMA50=434.56, SMA200=484.08, RSI14=54.85
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=185.24, SMA20=185.78, SMA50=185.81, SMA200=176.64, RSI14=47.26
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 100290.34
+Buying Power: 150408.98
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=611.65, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=681.14, SMA20=684.66, SMA50=687.67, SMA200=657.36, RSI14=46.01
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=261.33, SMA20=264.99, SMA50=263.79, SMA200=244.74, RSI14=46.14
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=406.05, SMA20=401.21, SMA50=434.57, SMA200=484.08, RSI14=54.97
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=185.47, SMA20=185.80, SMA50=185.81, SMA200=176.65, RSI14=47.50
+Connected to Alpaca paper account
+Status: AccountStatus.ACTIVE
+Equity: 100220.64
+Buying Power: 150339.28
+--------------------------------------------------
+
+Managing open position: QQQ
+QQQ: fetched 307 bars
+QQQ: current=611.02, stop=602.66, target=620.92
+QQQ: hold
+
+==================================================
+
+Current open positions: ['QQQ']
+
+Checking SPY...
+SPY: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=680.40, SMA20=684.63, SMA50=687.66, SMA200=657.36, RSI14=45.38
+
+Checking QQQ...
+Skipping QQQ: already in position
+
+Checking AAPL...
+AAPL: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=261.22, SMA20=264.98, SMA50=263.79, SMA200=244.74, RSI14=45.99
+
+Checking MSFT...
+MSFT: fetched 307 bars
+Signal result: False | Reason: Trend conditions not met
+Close=405.76, SMA20=401.20, SMA50=434.56, SMA200=484.08, RSI14=54.73
+
+Checking NVDA...
+NVDA: fetched 307 bars
+Signal result: False | Reason: RSI not in valid range
+Close=185.75, SMA20=185.81, SMA50=185.82, SMA200=176.65, RSI14=47.80
