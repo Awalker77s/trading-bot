@@ -642,23 +642,13 @@ def evaluate_entry(df: pd.DataFrame) -> tuple[bool, str, str, str]:
         # Determine bias from EMA crossover for correct direction reporting
         ema_bearish = latest.get("ema_fast", 0) < latest.get("ema_slow", 0)
         if ema_bearish:
-            # Bearish bias — try short first
+            # Bearish bias — evaluate short signal only
             signal, reason = signal_trend_short(df)
-            if signal:
-                return True, reason, regime, "short"
-            signal, reason = signal_trend_long(df)
-            if signal:
-                return True, reason, regime, "long"
-            return False, reason, regime, "short"
+            return signal, reason, regime, "short"
         else:
-            # Bullish bias — try long first
+            # Bullish bias — evaluate long signal only
             signal, reason = signal_trend_long(df)
-            if signal:
-                return True, reason, regime, "long"
-            signal, reason = signal_trend_short(df)
-            if signal:
-                return True, reason, regime, "short"
-            return False, reason, regime, "long"
+            return signal, reason, regime, "long"
 
     elif regime == "ranging":
         # Try mean-reversion long first
