@@ -936,11 +936,45 @@ def build_symbol_analysis_cache(
 ) -> dict[str, pd.DataFrame]:
     """Fetch + indicator-calculate once per symbol per run."""
     cache: dict[str, pd.DataFrame] = {}
-    for symbol in symbols:
-        bars = fetch_daily_bars(data_client, symbol)
-        if bars.empty:
-            continue
-        cache[symbol] = calculate_indicators(bars)
+    if not symbols:
+        return cache
+
+    # OPT: single batched Alpaca API call for all symbols instead of N sequential fetches
+    start_date = datetime.now(timezone.utc) - timedelta(days=BARS_FETCH_LOOKBACK_DAYS)
+    request = StockBarsRequest(
+        symbol_or_symbols=symbols,
+        timeframe=TimeFrame.Day,
+        start=start_date,
+        adjustment="raw",
+    )
+    try:
+        bars = retry_api_call(data_client.get_stock_bars, request)
+        df_all = bars.df
+        if df_all.empty:
+            return cache
+        for symbol in symbols:
+            try:
+                if isinstance(df_all.index, pd.MultiIndex):
+                    if symbol not in df_all.index.get_level_values(0):
+                        log.info(f"{symbol}: no bars in batch response")
+                        continue
+                    df = df_all.xs(symbol, level=0).reset_index()
+                else:
+                    df = df_all.reset_index()
+                df = validate_bars_df(df, symbol)
+                if df.empty:
+                    continue
+                log.info(f"{symbol}: fetched {len(df)} daily bars")
+                cache[symbol] = calculate_indicators(df)
+            except Exception as exc:
+                log.warning(f"{symbol}: error extracting from batch bars: {exc}")
+    except Exception as exc:
+        log.warning("Batch bar fetch failed (%s) — falling back to sequential", exc)
+        for symbol in symbols:
+            bars = fetch_daily_bars(data_client, symbol)
+            if bars.empty:
+                continue
+            cache[symbol] = calculate_indicators(bars)
     return cache
 
 
@@ -1262,9 +1296,12 @@ def count_trading_days_held(entry_date_str: str) -> int:
 
 def manage_open_positions(trading_client: TradingClient,
                           data_client: StockHistoricalDataClient,
-                          analysis_cache: dict[str, pd.DataFrame] | None = None) -> set[str]:
+                          analysis_cache: dict[str, pd.DataFrame] | None = None,
+                          open_positions: dict | None = None) -> set[str]:
     """Manage all open positions with dynamic exit logic (long and short)."""
-    open_positions = get_open_positions(trading_client)
+    # OPT: accept pre-fetched positions so non-stock assets are only logged once per run
+    if open_positions is None:
+        open_positions = get_open_positions(trading_client)
     log_data = load_trade_log()
     submitted_exit_symbols: set[str] = set()
     managed_symbols: list[str] = []
@@ -1543,10 +1580,13 @@ def manage_open_positions(trading_client: TradingClient,
 def scan_for_new_entries(trading_client: TradingClient,
                          data_client: StockHistoricalDataClient,
                          analysis_cache: dict[str, pd.DataFrame] | None = None,
-                         recently_submitted_exits: set[str] | None = None) -> None:
+                         recently_submitted_exits: set[str] | None = None,
+                         open_positions: dict | None = None) -> None:
     """Scan watchlist for new entry signals."""
     log_data = load_trade_log()
-    open_positions = get_open_positions(trading_client)
+    # OPT: accept pre-fetched positions so non-stock assets are only logged once per run
+    if open_positions is None:
+        open_positions = get_open_positions(trading_client)
     recently_submitted_exits = recently_submitted_exits or set()
     effective_open_positions = {
         symbol: position
@@ -1734,10 +1774,12 @@ def scan_for_new_entries(trading_client: TradingClient,
 # DAILY SUMMARY
 # ============================================================
 
-def print_daily_summary(trading_client: TradingClient) -> None:
+def print_daily_summary(trading_client: TradingClient, open_positions: dict | None = None) -> None:
     log_data = load_trade_log()
     account_equity = get_account_equity(trading_client)
-    open_positions = get_open_positions(trading_client)
+    # OPT: accept pre-fetched positions so non-stock assets are only logged once per run
+    if open_positions is None:
+        open_positions = get_open_positions(trading_client)
 
     realized_today = get_realized_pnl_today(log_data)
     loss_limit_dollars = account_equity * MAX_DAILY_LOSS_PCT
@@ -1803,6 +1845,8 @@ def run_bot() -> None:
              f"Buying Power: ${float(account.buying_power):,.2f}")
     log.info("-" * 60)
 
+    # OPT: fetch and filter positions once at the top so non-stock symbols (e.g. BTCUSD)
+    # are only logged once per run instead of once per phase
     open_positions = get_open_positions(trading_client)
     symbols_to_prepare = sorted(set(WATCHLIST) | set(open_positions.keys()))
     analysis_cache = build_symbol_analysis_cache(data_client, symbols_to_prepare)
@@ -1810,7 +1854,8 @@ def run_bot() -> None:
 
     # Phase 1: Manage existing positions (exits, trailing stops)
     log.info("PHASE 1: Managing open positions...")
-    submitted_exits = manage_open_positions(trading_client, data_client, analysis_cache)
+    submitted_exits = manage_open_positions(trading_client, data_client, analysis_cache,
+                                            open_positions=open_positions)
 
     # Phase 2: Scan for new entries
     log.info("\nPHASE 2: Scanning for new entries...")
@@ -1819,17 +1864,21 @@ def run_bot() -> None:
         data_client,
         analysis_cache,
         recently_submitted_exits=submitted_exits,
+        open_positions=open_positions,
     )
 
     # Phase 3: Daily summary + equity curve
-    print_daily_summary(trading_client)
+    print_daily_summary(trading_client, open_positions=open_positions)
 
     # Phase 4: Monitoring — heartbeat + optional run-complete notification
     try:
         _equity = get_account_equity(trading_client)
-        _open_n = len(get_open_positions(trading_client))
+        # Derive open count from pre-fetched positions minus any exits submitted this run
+        _open_n = len({s: p for s, p in open_positions.items() if s not in submitted_exits})
         _realized = get_realized_pnl_today(load_trade_log())
         monitor.write_heartbeat("stocks", _equity, _open_n)
+        # OPT: log equity curve per-run (was missing from stock bot — crypto already called this)
+        monitor.log_equity_curve("stocks", _equity, _open_n)
         monitor.notify_run_complete("stocks", _equity, _open_n, _realized)
     except Exception as _mon_exc:
         log.warning("monitor phase failed (non-critical): %s", _mon_exc)
