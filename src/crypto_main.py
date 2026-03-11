@@ -46,6 +46,8 @@ CRYPTO_MAX_ATR_PCT            = float(os.getenv("CRYPTO_MAX_ATR_PCT",           
 CRYPTO_LOOKBACK_DAYS          = int(os.getenv("CRYPTO_LOOKBACK_DAYS",             "220"))
 CRYPTO_MAX_DAILY_LOSS_PCT     = float(os.getenv("CRYPTO_MAX_DAILY_LOSS_PCT",      "0.02"))
 CRYPTO_RUN_INTERVAL_SECONDS   = int(os.getenv("CRYPTO_RUN_INTERVAL_SECONDS",      "900"))
+# OPT: volume confirmation gate — only enter when current bar volume > 20-period average
+CRYPTO_VOLUME_FILTER          = os.getenv("CRYPTO_VOLUME_FILTER", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def setup_crypto_logging() -> logging.Logger:
@@ -125,6 +127,7 @@ def evaluate_crypto_entry(df: pd.DataFrame) -> tuple[bool, str]:
         return False, "Insufficient data"
 
     latest = df.iloc[-1]
+    prev = df.iloc[-2]
     required = ["close", "ema_fast", "ema_slow", "sma50", "rsi", "adx", "atr_pct"]
     for field in required:
         if pd.isna(latest.get(field)):
@@ -135,14 +138,29 @@ def evaluate_crypto_entry(df: pd.DataFrame) -> tuple[bool, str]:
     if latest["atr_pct"] > CRYPTO_MAX_ATR_PCT:
         return False, f"ATR% too high ({latest['atr_pct']:.4f})"
 
-    if latest["ema_fast"] <= latest["ema_slow"]:
-        return False, "EMA fast <= EMA slow"
+    # OPT: require a fresh crossover (prev bar fast<=slow, current bar fast>slow) so we
+    # don't enter mid-trend after the crossover already happened bars ago
+    if pd.isna(prev.get("ema_fast")) or pd.isna(prev.get("ema_slow")):
+        return False, "Missing prev bar EMA data for crossover check"
+    if not (prev["ema_fast"] <= prev["ema_slow"] and latest["ema_fast"] > latest["ema_slow"]):
+        return False, (
+            f"No fresh EMA crossover (prev fast={prev['ema_fast']:.2f} slow={prev['ema_slow']:.2f}, "
+            f"cur fast={latest['ema_fast']:.2f} slow={latest['ema_slow']:.2f})"
+        )
     if latest["close"] <= latest["sma50"]:
         return False, "Close <= SMA50"
     if latest["adx"] < 18:
         return False, f"ADX weak ({latest['adx']:.1f})"
     if not (45 <= latest["rsi"] <= 72):
         return False, f"RSI out of range ({latest['rsi']:.1f})"
+
+    # OPT: volume confirmation — current bar must exceed 20-period average volume to reduce
+    # false signals (toggled by CRYPTO_VOLUME_FILTER env flag)
+    if CRYPTO_VOLUME_FILTER:
+        vol = latest.get("volume", 0)
+        vol_sma = latest.get("volume_sma", 0)
+        if pd.isna(vol_sma) or vol_sma <= 0 or vol <= vol_sma:
+            return False, f"Volume below 20-period avg ({vol:.0f} <= {vol_sma:.0f})"
 
     return True, "Momentum breakout continuation"
 
