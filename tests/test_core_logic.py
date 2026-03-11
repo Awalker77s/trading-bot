@@ -144,3 +144,55 @@ def test_scan_for_new_entries_ignores_recently_submitted_exits(monkeypatch):
     )
 
     assert any("Ignoring recently submitted exits" in line for line in captured)
+
+
+def test_reconcile_position_trade_entry_reconstructs_when_missing(monkeypatch):
+    saved_payloads = []
+    monkeypatch.setattr(main, "save_trade_log", lambda rows: saved_payloads.append(list(rows)))
+
+    class DummyPosition:
+        qty = "5"
+        avg_entry_price = "100.0"
+
+    log_data = []
+    entry, state = main.reconcile_position_trade_entry(
+        log_data=log_data,
+        symbol="QQQ",
+        position=DummyPosition(),
+        is_short=False,
+        current_price=101.0,
+        current_atr=2.0,
+    )
+
+    assert state == "reconstructed"
+    assert entry is not None
+    assert entry["symbol"] == "QQQ"
+    assert entry["side"] == "BUY"
+    assert entry["strategy"] == "reconstructed_from_alpaca"
+    assert len(log_data) == 1
+    assert len(saved_payloads) == 1
+
+
+def test_reconcile_position_trade_entry_uses_fallback_open_side(monkeypatch):
+    logs = []
+    monkeypatch.setattr(main.log, "warning", lambda message, *args: logs.append(message % args if args else message))
+
+    class DummyPosition:
+        qty = "10"
+        avg_entry_price = "200"
+
+    log_data = [{"symbol": "SPY", "side": "BUY", "closed": False, "order_id": "abc"}]
+
+    entry, state = main.reconcile_position_trade_entry(
+        log_data=log_data,
+        symbol="SPY",
+        position=DummyPosition(),
+        is_short=True,
+        current_price=198.0,
+        current_atr=1.5,
+    )
+
+    assert state == "managed"
+    assert entry is not None
+    assert entry["order_id"] == "abc"
+    assert any("Treating as managed" in line for line in logs)
