@@ -32,12 +32,25 @@ LOG_DIR = SCRIPT_DIR / "logs"
 CRYPTO_LOG_FILE = LOG_DIR / "crypto_bot.log"
 CRYPTO_TRADE_LOG_FILE = LOG_DIR / "crypto_trade_log.json"
 
-CRYPTO_WATCHLIST = ["BTC/USD", "ETH/USD", "SOL/USD"]
+# fmt: off
+CRYPTO_WATCHLIST = [
+    "BTC/USD",   # Bitcoin
+    "ETH/USD",   # Ethereum
+    "SOL/USD",   # Solana
+    "LINK/USD",  # Chainlink          # verify Alpaca support before live
+    "AVAX/USD",  # Avalanche          # verify Alpaca support before live
+    "DOT/USD",   # Polkadot           # verify Alpaca support before live
+    "MATIC/USD", # Polygon            # verify Alpaca support before live
+    "UNI/USD",   # Uniswap            # verify Alpaca support before live
+    "AAVE/USD",  # Aave               # verify Alpaca support before live
+    "LTC/USD",   # Litecoin           # verify Alpaca support before live
+]
+# fmt: on
 
 # Crypto risk tuning (separate from stocks) — all overridable via config/.env
 CRYPTO_RISK_PER_TRADE         = float(os.getenv("CRYPTO_RISK_PER_TRADE",          "0.01"))
-CRYPTO_MAX_POSITION_PCT       = float(os.getenv("CRYPTO_MAX_POSITION_PCT",        "0.12"))
-CRYPTO_MAX_OPEN_POSITIONS     = int(os.getenv("CRYPTO_MAX_OPEN_POSITIONS",        "3"))
+CRYPTO_POSITION_SIZE_PCT      = float(os.getenv("CRYPTO_POSITION_SIZE_PCT",       "0.12"))  # 6 pos × 12% ≈ 72% buying power
+MAX_CRYPTO_POSITIONS          = int(os.getenv("MAX_CRYPTO_POSITIONS",             "6"))
 CRYPTO_MIN_NOTIONAL_USD       = float(os.getenv("CRYPTO_MIN_NOTIONAL_USD",        "25.0"))
 CRYPTO_STOP_ATR_MULTIPLIER    = float(os.getenv("CRYPTO_STOP_ATR_MULTIPLIER",     "2.2"))
 CRYPTO_TARGET_ATR_MULTIPLIER  = float(os.getenv("CRYPTO_TARGET_ATR_MULTIPLIER",   "3.8"))
@@ -171,7 +184,7 @@ def calculate_notional_size(equity: float, price: float, atr: float) -> float:
     stop_distance = atr * CRYPTO_STOP_ATR_MULTIPLIER
     risk_dollars = equity * CRYPTO_RISK_PER_TRADE
     risk_based_notional = (risk_dollars * price) / stop_distance
-    cap_notional = equity * CRYPTO_MAX_POSITION_PCT
+    cap_notional = equity * CRYPTO_POSITION_SIZE_PCT
     notional = min(risk_based_notional, cap_notional)
     if notional < CRYPTO_MIN_NOTIONAL_USD:
         return 0.0
@@ -244,7 +257,7 @@ def scan_for_entries(trading_client: TradingClient, data_client: CryptoHistorica
         if symbol in open_positions or position_key in open_positions:
             log.info(f"{symbol}: SKIP already open")
             continue
-        if len(open_positions) >= CRYPTO_MAX_OPEN_POSITIONS:
+        if len(open_positions) >= MAX_CRYPTO_POSITIONS:
             log.info("Max crypto open positions reached")
             break
 
