@@ -52,7 +52,7 @@ CRYPTO_MIN_NOTIONAL_USD       = float(os.getenv("CRYPTO_MIN_NOTIONAL_USD",      
 CRYPTO_STOP_ATR_MULTIPLIER    = float(os.getenv("CRYPTO_STOP_ATR_MULTIPLIER",     "2.2"))
 CRYPTO_TARGET_ATR_MULTIPLIER  = float(os.getenv("CRYPTO_TARGET_ATR_MULTIPLIER",   "3.8"))
 CRYPTO_MIN_ATR_PCT            = float(os.getenv("CRYPTO_MIN_ATR_PCT",             "0.004"))
-CRYPTO_MAX_ATR_PCT            = float(os.getenv("CRYPTO_MAX_ATR_PCT",             "0.10"))
+CRYPTO_MAX_ATR_PCT            = float(os.getenv("CRYPTO_MAX_ATR_PCT",             "0.15"))
 CRYPTO_LOOKBACK_DAYS          = int(os.getenv("CRYPTO_LOOKBACK_DAYS",             "220"))
 CRYPTO_MAX_DAILY_LOSS_PCT     = float(os.getenv("CRYPTO_MAX_DAILY_LOSS_PCT",      "0.02"))
 # OPT: volume confirmation gate — only enter when current bar volume > 20-period average
@@ -183,16 +183,15 @@ def evaluate_crypto_entry(df: pd.DataFrame) -> tuple[bool, str]:
 
 
 def evaluate_crypto_short_entry(df: pd.DataFrame) -> tuple[bool, str]:
-    """Short entry signal — triggers on a fresh EMA crossover DOWN with confirming filters.
+    """Short entry signal — triggers when fast EMA is currently below slow EMA (downtrend state).
 
-    All conditions must be true:
-    - Fresh EMA crossover DOWN (primary): prev fast >= slow, current fast < slow
-      OR fallback: fast EMA has been below slow EMA for <= CROSSOVER_LOOKBACK candles
-    - RSI > 55 (not already oversold — catching start of selling pressure)
-    - ADX > 20 (trend has enough strength)
-    - Close < SMA50 (price is in a downtrend context)
+    No fresh crossover is required; we check current EMA state instead, then confirm with:
+    - RSI < 52 (momentum is down or neutral, not overbought)
+    - ADX > 15 (some trend strength present)
+    - Close < SMA50 (price in downtrend context)
     - ATR% within the allowed threshold (same filter as longs)
     - Volume > 20-period average (if CRYPTO_VOLUME_FILTER=true)
+    The "not already in a short position" guard is enforced in scan_for_entries().
     """
     if len(df) < 60:
         return False, "Insufficient data"
@@ -208,29 +207,18 @@ def evaluate_crypto_short_entry(df: pd.DataFrame) -> tuple[bool, str]:
     if latest["atr_pct"] > CRYPTO_MAX_ATR_PCT:
         return False, f"ATR% too high ({latest['atr_pct']:.4f})"
 
-    crossed_down_recently = False
-    for i in range(1, CROSSOVER_LOOKBACK_CANDLES + 1):
-        older = df.iloc[-i - 1]
-        newer = df.iloc[-i]
-        if any(
-            pd.isna(row.get("ema_fast")) or pd.isna(row.get("ema_slow"))
-            for row in (older, newer)
-        ):
-            continue
-        if older["ema_fast"] >= older["ema_slow"] and newer["ema_fast"] < newer["ema_slow"]:
-            crossed_down_recently = True
-            break
-    if not crossed_down_recently:
+    # Primary condition: fast EMA currently below slow EMA (in downtrend)
+    if latest["ema_fast"] >= latest["ema_slow"]:
         return False, (
-            f"No EMA crossover DOWN in last {CROSSOVER_LOOKBACK_CANDLES} candles "
-            f"(cur fast={latest['ema_fast']:.2f} slow={latest['ema_slow']:.2f})"
+            f"Fast EMA not below slow EMA "
+            f"(fast={latest['ema_fast']:.2f} slow={latest['ema_slow']:.2f})"
         )
 
-    if latest["rsi"] <= 55:
-        return False, f"RSI not above 55 ({latest['rsi']:.1f})"
+    if latest["rsi"] >= 52:
+        return False, f"RSI too high ({latest['rsi']:.1f} >= 52)"
 
-    if latest["adx"] < 20:
-        return False, f"ADX weak ({latest['adx']:.1f})"
+    if latest["adx"] < 15:
+        return False, f"ADX weak ({latest['adx']:.1f} < 15)"
 
     if latest["close"] >= latest["sma50"]:
         return False, "Close >= SMA50 (not in downtrend context)"
@@ -241,7 +229,10 @@ def evaluate_crypto_short_entry(df: pd.DataFrame) -> tuple[bool, str]:
         if pd.isna(vol_sma) or vol_sma <= 0 or vol <= vol_sma:
             return False, f"Volume below 20-period avg ({vol:.0f} <= {vol_sma:.0f})"
 
-    return True, f"EMA crossover DOWN within last {CROSSOVER_LOOKBACK_CANDLES} candles"
+    return True, (
+        f"Downtrend: fast EMA < slow EMA "
+        f"(fast={latest['ema_fast']:.2f} slow={latest['ema_slow']:.2f})"
+    )
 
 
 def calculate_notional_size(equity: float, price: float, atr: float) -> float:
