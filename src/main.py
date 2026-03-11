@@ -49,14 +49,34 @@ TRADE_LOG_FILE = LOG_DIR / "trade_log.json"
 EQUITY_LOG_FILE = LOG_DIR / "equity_curve.csv"
 BOT_LOG_FILE = LOG_DIR / "bot.log"
 
-WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA",
-             "GOOG", "AMD", "NFLX", "AVGO"]
+# fmt: off
+WATCHLIST = [
+    # Broad market ETFs
+    "SPY", "QQQ", "IWM", "DIA",
+    # Sector ETFs
+    "XLF", "XLE", "XLV", "XLI", "XLK", "XLC",
+    # Large-cap tech
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG", "TSLA", "AVGO", "AMD", "NFLX",
+    # Finance
+    "JPM", "GS", "BAC", "MS", "V", "MA",
+    # Energy
+    "XOM", "CVX", "OXY",
+    # Healthcare
+    "UNH", "LLY", "JNJ", "ABBV",
+    # Consumer
+    "HD", "COST", "WMT", "TGT",
+    # Industrials
+    "BA", "CAT", "DE",
+    # Crypto-adjacent equities
+    "COIN", "MSTR",
+]
+# fmt: on
 
 # Risk parameters
 RISK_PER_TRADE = 0.015           # 1.5% of equity risked per trade
-MAX_POSITION_PCT = 0.10          # Max 10% of equity in single position
-MAX_OPEN_POSITIONS = 6
-MAX_DAILY_LOSS_PCT = 0.03        # 3% daily drawdown kill switch
+POSITION_SIZE_PCT = 0.06         # Max 6% of equity per position (15 pos × 6% ≈ 90% deployed)
+MAX_STOCK_POSITIONS = 15
+DAILY_LOSS_PCT = 0.04            # 4% daily drawdown kill switch
 ATR_STOP_MULTIPLIER_TREND = 2.0  # 2x ATR stop for trend trades
 ATR_STOP_MULTIPLIER_RANGE = 1.5  # 1.5x ATR stop for range trades
 ATR_TARGET_MULTIPLIER_TREND = 4.0  # 4x ATR target for trend (2:1 R:R)
@@ -200,9 +220,9 @@ def validate_startup_config() -> dict[str, Any]:
 
     checks = {
         "RISK_PER_TRADE": (0 < RISK_PER_TRADE <= 0.05),
-        "MAX_POSITION_PCT": (0 < MAX_POSITION_PCT <= 0.25),
-        "MAX_OPEN_POSITIONS": (MAX_OPEN_POSITIONS >= 1),
-        "MAX_DAILY_LOSS_PCT": (0 < MAX_DAILY_LOSS_PCT <= 0.10),
+        "POSITION_SIZE_PCT": (0 < POSITION_SIZE_PCT <= 0.25),
+        "MAX_STOCK_POSITIONS": (MAX_STOCK_POSITIONS >= 1),
+        "DAILY_LOSS_PCT": (0 < DAILY_LOSS_PCT <= 0.10),
     }
     invalid = [name for name, ok in checks.items() if not ok]
     if invalid:
@@ -1252,7 +1272,7 @@ def get_realized_pnl_today(log_data: list) -> float:
 def daily_loss_limit_hit(log_data: list,
                          account_equity: float) -> tuple[bool, float, float]:
     realized_today = get_realized_pnl_today(log_data)
-    loss_limit_dollars = account_equity * MAX_DAILY_LOSS_PCT
+    loss_limit_dollars = account_equity * DAILY_LOSS_PCT
     hit = realized_today <= -loss_limit_dollars
     return hit, realized_today, loss_limit_dollars
 
@@ -1615,12 +1635,12 @@ def scan_for_new_entries(trading_client: TradingClient,
         )
         return
 
-    if len(effective_open_positions) >= MAX_OPEN_POSITIONS:
+    if len(effective_open_positions) >= MAX_STOCK_POSITIONS:
         log.info("Max open positions reached — no new trades.")
         return
 
     entries_this_run = 0
-    max_entries_per_run = MAX_OPEN_POSITIONS - len(effective_open_positions)
+    max_entries_per_run = MAX_STOCK_POSITIONS - len(effective_open_positions)
 
     for symbol in WATCHLIST:
         if entries_this_run >= max_entries_per_run:
@@ -1675,7 +1695,7 @@ def scan_for_new_entries(trading_client: TradingClient,
                 atr=current_atr,
                 stop_multiplier=stop_mult,
                 risk_per_trade=RISK_PER_TRADE,
-                max_position_pct=MAX_POSITION_PCT,
+                max_position_pct=POSITION_SIZE_PCT,
                 direction=direction
             )
 
@@ -1782,7 +1802,7 @@ def print_daily_summary(trading_client: TradingClient, open_positions: dict | No
         open_positions = get_open_positions(trading_client)
 
     realized_today = get_realized_pnl_today(log_data)
-    loss_limit_dollars = account_equity * MAX_DAILY_LOSS_PCT
+    loss_limit_dollars = account_equity * DAILY_LOSS_PCT
 
     today = utc_today_str()
     today_sells = [
