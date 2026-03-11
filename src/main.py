@@ -1070,6 +1070,121 @@ def find_latest_open_short(log_data: list, symbol: str) -> dict | None:
     return find_latest_open_trade(log_data, symbol, "SHORT")
 
 
+def find_latest_open_trade_any_side(log_data: list[dict], symbol: str) -> dict | None:
+    """Fallback lookup for legacy/misaligned logs where side may not match qty sign."""
+    for entry in reversed(log_data):
+        if entry.get("symbol") != symbol:
+            continue
+        if entry.get("closed", False):
+            continue
+        if entry.get("side") in {"BUY", "SHORT"}:
+            return entry
+    return None
+
+
+def reconstruct_trade_entry_from_position(
+    symbol: str,
+    position: Any,
+    is_short: bool,
+    current_price: float,
+    current_atr: float,
+) -> dict | None:
+    """Build a minimal synthetic entry so Alpaca positions can still be managed."""
+    try:
+        qty = abs(int(float(position.qty)))
+    except Exception:
+        qty = 0
+    if qty <= 0:
+        return None
+
+    raw_entry = getattr(position, "avg_entry_price", None)
+    entry_price = float(raw_entry) if raw_entry not in (None, "", 0, "0") else current_price
+    if entry_price <= 0:
+        return None
+
+    atr_for_levels = current_atr if current_atr > 0 else max(entry_price * 0.02, 0.01)
+    stop_mult = ATR_STOP_MULTIPLIER_SHORT if is_short else ATR_STOP_MULTIPLIER_TREND
+    target_mult = ATR_TARGET_MULTIPLIER_SHORT if is_short else ATR_TARGET_MULTIPLIER_TREND
+
+    if is_short:
+        stop_loss = entry_price + (stop_mult * atr_for_levels)
+        take_profit = entry_price - (target_mult * atr_for_levels)
+        direction = "short"
+        side = "SHORT"
+    else:
+        stop_loss = entry_price - (stop_mult * atr_for_levels)
+        take_profit = entry_price + (target_mult * atr_for_levels)
+        direction = "long"
+        side = "BUY"
+
+    ts = now_utc_iso()
+    return {
+        "timestamp_utc": ts,
+        "trade_date": utc_today_str(),
+        "symbol": symbol,
+        "side": side,
+        "direction": direction,
+        "qty": qty,
+        "entry_reference_price": round(entry_price, 4),
+        "stop_loss_price": round(stop_loss, 4),
+        "take_profit_price": round(take_profit, 4),
+        "regime": "unknown",
+        "strategy": "reconstructed_from_alpaca",
+        "order_id": f"reconstructed-{symbol}-{int(time.time())}",
+        "closed": False,
+        "notes": {
+            "reconstructed": True,
+            "source": "alpaca_open_position",
+            "alpaca_avg_entry_price": float(raw_entry) if raw_entry not in (None, "") else None,
+        },
+    }
+
+
+def reconcile_position_trade_entry(
+    log_data: list[dict],
+    symbol: str,
+    position: Any,
+    is_short: bool,
+    current_price: float,
+    current_atr: float,
+) -> tuple[dict | None, str]:
+    """Resolve a manageable trade entry for an Alpaca open stock position.
+
+    Returns (trade_entry, state) where state is one of:
+    - managed: matched to an existing local open trade entry
+    - reconstructed: synthetic trade entry created from Alpaca position
+    - unmanaged: cannot match or reconstruct
+    """
+    trade_entry = find_latest_open_short(log_data, symbol) if is_short else find_latest_open_buy(log_data, symbol)
+    if trade_entry:
+        return trade_entry, "managed"
+
+    fallback = find_latest_open_trade_any_side(log_data, symbol)
+    if fallback:
+        expected = "SHORT" if is_short else "BUY"
+        log.warning(
+            "%s: Found open trade log with side=%s (expected=%s from Alpaca qty sign). Treating as managed.",
+            symbol,
+            fallback.get("side"),
+            expected,
+        )
+        return fallback, "managed"
+
+    reconstructed = reconstruct_trade_entry_from_position(
+        symbol=symbol,
+        position=position,
+        is_short=is_short,
+        current_price=current_price,
+        current_atr=current_atr,
+    )
+    if reconstructed:
+        log_data.append(reconstructed)
+        save_trade_log(log_data)
+        return reconstructed, "reconstructed"
+
+    return None, "unmanaged"
+
+
 def has_exited_today(log_data: list, symbol: str) -> bool:
     today = utc_today_str()
     for entry in reversed(log_data):
@@ -1150,6 +1265,9 @@ def manage_open_positions(trading_client: TradingClient,
     open_positions = get_open_positions(trading_client)
     log_data = load_trade_log()
     submitted_exit_symbols: set[str] = set()
+    managed_symbols: list[str] = []
+    reconstructed_symbols: list[str] = []
+    unmanaged_symbols: list[str] = []
 
     if not open_positions:
         log.info("No open positions to manage.")
@@ -1176,16 +1294,31 @@ def manage_open_positions(trading_client: TradingClient,
             # Alpaca: negative qty = short position
             is_short = float(position.qty) < 0
 
-            if is_short:
-                trade_entry = find_latest_open_short(log_data, symbol)
-                if not trade_entry:
-                    log.warning(f"No matching SHORT log for {symbol}; skipping")
-                    continue
-            else:
-                trade_entry = find_latest_open_buy(log_data, symbol)
-                if not trade_entry:
-                    log.warning(f"No matching BUY log for {symbol}; skipping")
-                    continue
+            trade_entry, reconcile_state = reconcile_position_trade_entry(
+                log_data=log_data,
+                symbol=symbol,
+                position=position,
+                is_short=is_short,
+                current_price=current_price,
+                current_atr=current_atr,
+            )
+            if reconcile_state == "reconstructed":
+                reconstructed_symbols.append(symbol)
+                log.warning(
+                    "%s: Reconstructed missing local trade state from Alpaca position; strategy management resumed.",
+                    symbol,
+                )
+            elif reconcile_state == "managed":
+                managed_symbols.append(symbol)
+
+            if not trade_entry:
+                unmanaged_symbols.append(symbol)
+                log.error(
+                    "%s: UNMANAGED Alpaca stock position (no matching log and reconstruction failed). "
+                    "Position quarantined from automated exits.",
+                    symbol,
+                )
+                continue
 
             entry_price = float(trade_entry["entry_reference_price"])
             original_stop = float(trade_entry["stop_loss_price"])
@@ -1381,6 +1514,13 @@ def manage_open_positions(trading_client: TradingClient,
 
         except Exception as e:
             log.error(f"Error managing {symbol}: {e}\n{traceback.format_exc()}")
+
+    if managed_symbols:
+        log.info("Managed stock positions this run: %s", sorted(set(managed_symbols)))
+    if reconstructed_symbols:
+        log.warning("Reconstructed stock positions this run: %s", sorted(set(reconstructed_symbols)))
+    if unmanaged_symbols:
+        log.error("Unmanaged/quarantined stock positions this run: %s", sorted(set(unmanaged_symbols)))
 
     return submitted_exit_symbols
 
