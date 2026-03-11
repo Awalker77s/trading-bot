@@ -61,6 +61,7 @@ CRYPTO_MAX_DAILY_LOSS_PCT     = float(os.getenv("CRYPTO_MAX_DAILY_LOSS_PCT",    
 CRYPTO_RUN_INTERVAL_SECONDS   = int(os.getenv("CRYPTO_RUN_INTERVAL_SECONDS",      "900"))
 # OPT: volume confirmation gate — only enter when current bar volume > 20-period average
 CRYPTO_VOLUME_FILTER          = os.getenv("CRYPTO_VOLUME_FILTER", "true").strip().lower() in {"1", "true", "yes", "on"}
+CROSSOVER_LOOKBACK            = 3  # candles: accept short entry if fast EMA crossed below slow within this many bars
 
 
 def setup_crypto_logging() -> logging.Logger:
@@ -182,7 +183,8 @@ def evaluate_crypto_short_entry(df: pd.DataFrame) -> tuple[bool, str]:
     """Short entry signal — triggers on a fresh EMA crossover DOWN with confirming filters.
 
     All conditions must be true:
-    - Fresh EMA crossover DOWN: prev fast >= slow, current fast < slow
+    - Fresh EMA crossover DOWN (primary): prev fast >= slow, current fast < slow
+      OR fallback: fast EMA has been below slow EMA for <= CROSSOVER_LOOKBACK candles
     - RSI > 55 (not already oversold — catching start of selling pressure)
     - ADX > 20 (trend has enough strength)
     - Close < SMA50 (price is in a downtrend context)
@@ -204,14 +206,33 @@ def evaluate_crypto_short_entry(df: pd.DataFrame) -> tuple[bool, str]:
     if latest["atr_pct"] > CRYPTO_MAX_ATR_PCT:
         return False, f"ATR% too high ({latest['atr_pct']:.4f})"
 
-    # Fresh EMA crossover DOWN: prev fast >= slow, current fast < slow
+    # EMA crossover DOWN check: primary (exact crossover candle) or fallback (recently crossed)
     if pd.isna(prev.get("ema_fast")) or pd.isna(prev.get("ema_slow")):
         return False, "Missing prev bar EMA data for crossover check"
-    if not (prev["ema_fast"] >= prev["ema_slow"] and latest["ema_fast"] < latest["ema_slow"]):
-        return False, (
-            f"No fresh EMA crossover DOWN (prev fast={prev['ema_fast']:.2f} slow={prev['ema_slow']:.2f}, "
-            f"cur fast={latest['ema_fast']:.2f} slow={latest['ema_slow']:.2f})"
-        )
+
+    primary_cross = prev["ema_fast"] >= prev["ema_slow"] and latest["ema_fast"] < latest["ema_slow"]
+
+    if not primary_cross:
+        # Fallback: fast has been below slow for <= CROSSOVER_LOOKBACK candles
+        bars_below = 0
+        for i in range(1, CROSSOVER_LOOKBACK + 1):
+            row = df.iloc[-i - 1]
+            if pd.isna(row.get("ema_fast")) or pd.isna(row.get("ema_slow")):
+                break
+            if row["ema_fast"] < row["ema_slow"]:
+                bars_below += 1
+            else:
+                break
+        # bars_below counts how many consecutive candles (before current) fast < slow
+        # current bar must also have fast < slow; combined span = bars_below + 1
+        if not (latest["ema_fast"] < latest["ema_slow"] and bars_below < CROSSOVER_LOOKBACK):
+            return False, (
+                f"No fresh EMA crossover DOWN (prev fast={prev['ema_fast']:.2f} slow={prev['ema_slow']:.2f}, "
+                f"cur fast={latest['ema_fast']:.2f} slow={latest['ema_slow']:.2f})"
+            )
+        crossover_reason = f"EMA crossed below {bars_below + 1} candle(s) ago (fallback)"
+    else:
+        crossover_reason = "Fresh EMA crossover DOWN"
 
     if latest["rsi"] <= 55:
         return False, f"RSI not above 55 ({latest['rsi']:.1f})"
@@ -228,7 +249,7 @@ def evaluate_crypto_short_entry(df: pd.DataFrame) -> tuple[bool, str]:
         if pd.isna(vol_sma) or vol_sma <= 0 or vol <= vol_sma:
             return False, f"Volume below 20-period avg ({vol:.0f} <= {vol_sma:.0f})"
 
-    return True, "Fresh EMA crossover DOWN"
+    return True, crossover_reason
 
 
 def calculate_notional_size(equity: float, price: float, atr: float) -> float:
