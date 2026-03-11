@@ -19,9 +19,13 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
+import time
+
 import main as shared
 import monitor
 
+# Load .env early so os.getenv() calls below pick up config values at import time.
+shared.load_environment()
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = SCRIPT_DIR / "logs"
@@ -30,16 +34,18 @@ CRYPTO_TRADE_LOG_FILE = LOG_DIR / "crypto_trade_log.json"
 
 CRYPTO_WATCHLIST = ["BTC/USD", "ETH/USD", "SOL/USD"]
 
-# Crypto risk tuning (separate from stocks)
-CRYPTO_RISK_PER_TRADE = 0.01
-CRYPTO_MAX_POSITION_PCT = 0.12
-CRYPTO_MAX_OPEN_POSITIONS = 3
-CRYPTO_MIN_NOTIONAL_USD = 25.0
-CRYPTO_STOP_ATR_MULTIPLIER = 2.2
-CRYPTO_TARGET_ATR_MULTIPLIER = 3.8
-CRYPTO_MIN_ATR_PCT = 0.004
-CRYPTO_MAX_ATR_PCT = 0.10
-CRYPTO_LOOKBACK_DAYS = 220
+# Crypto risk tuning (separate from stocks) — all overridable via config/.env
+CRYPTO_RISK_PER_TRADE         = float(os.getenv("CRYPTO_RISK_PER_TRADE",          "0.01"))
+CRYPTO_MAX_POSITION_PCT       = float(os.getenv("CRYPTO_MAX_POSITION_PCT",        "0.12"))
+CRYPTO_MAX_OPEN_POSITIONS     = int(os.getenv("CRYPTO_MAX_OPEN_POSITIONS",        "3"))
+CRYPTO_MIN_NOTIONAL_USD       = float(os.getenv("CRYPTO_MIN_NOTIONAL_USD",        "25.0"))
+CRYPTO_STOP_ATR_MULTIPLIER    = float(os.getenv("CRYPTO_STOP_ATR_MULTIPLIER",     "2.2"))
+CRYPTO_TARGET_ATR_MULTIPLIER  = float(os.getenv("CRYPTO_TARGET_ATR_MULTIPLIER",   "3.8"))
+CRYPTO_MIN_ATR_PCT            = float(os.getenv("CRYPTO_MIN_ATR_PCT",             "0.004"))
+CRYPTO_MAX_ATR_PCT            = float(os.getenv("CRYPTO_MAX_ATR_PCT",             "0.10"))
+CRYPTO_LOOKBACK_DAYS          = int(os.getenv("CRYPTO_LOOKBACK_DAYS",             "220"))
+CRYPTO_MAX_DAILY_LOSS_PCT     = float(os.getenv("CRYPTO_MAX_DAILY_LOSS_PCT",      "0.02"))
+CRYPTO_RUN_INTERVAL_SECONDS   = int(os.getenv("CRYPTO_RUN_INTERVAL_SECONDS",      "900"))
 
 
 def setup_crypto_logging() -> logging.Logger:
@@ -182,10 +188,37 @@ def submit_crypto_exit_order(trading_client: TradingClient, symbol: str, qty: fl
     return shared.retry_api_call(trading_client.submit_order, order_data=order)
 
 
+def _check_daily_loss_limit(log_rows: list[dict], equity: float) -> bool:
+    """Return True if today's realized losses have breached CRYPTO_MAX_DAILY_LOSS_PCT.
+
+    When True, callers should halt new entries for the remainder of the day.
+    Open position management is unaffected.
+    """
+    today = datetime.now(timezone.utc).date().isoformat()
+    realized_today = sum(
+        float(r.get("realized_pnl", 0.0))
+        for r in log_rows
+        if r.get("side") == "SELL" and str(r.get("timestamp_utc", "")).startswith(today)
+    )
+    limit = equity * CRYPTO_MAX_DAILY_LOSS_PCT
+    if realized_today < -limit:
+        log.warning(
+            "Daily loss limit reached: realized_today=$%.2f limit=-$%.2f — halting new entries",
+            realized_today,
+            limit,
+        )
+        monitor.notify_daily_loss_limit("crypto", realized_today, limit, equity)
+        return True
+    return False
+
+
 def scan_for_entries(trading_client: TradingClient, data_client: CryptoHistoricalDataClient) -> None:
     open_positions = get_open_crypto_positions(trading_client)
     equity = float(shared.retry_api_call(trading_client.get_account).equity)
     log_rows = load_crypto_trade_log()
+
+    if _check_daily_loss_limit(log_rows, equity):
+        return
 
     log.info(f"Crypto open positions: {sorted(open_positions.keys())}")
     for symbol in CRYPTO_WATCHLIST:
@@ -197,53 +230,56 @@ def scan_for_entries(trading_client: TradingClient, data_client: CryptoHistorica
             log.info("Max crypto open positions reached")
             break
 
-        raw = fetch_crypto_bars(data_client, symbol)
-        if raw.empty:
-            log.info(f"{symbol}: SKIP no bars")
-            continue
+        try:
+            raw = fetch_crypto_bars(data_client, symbol)
+            if raw.empty:
+                log.info(f"{symbol}: SKIP no bars")
+                continue
 
-        df = shared.calculate_indicators(raw)
-        signal, reason = evaluate_crypto_entry(df)
-        latest = df.iloc[-1]
-        log.info(
-            f"{symbol}: signal={signal} | {reason} | close={latest['close']:.2f} "
-            f"RSI={latest.get('rsi', 0):.1f} ADX={latest.get('adx', 0):.1f}"
-        )
-        if not signal:
-            continue
+            df = shared.calculate_indicators(raw)
+            signal, reason = evaluate_crypto_entry(df)
+            latest = df.iloc[-1]
+            log.info(
+                f"{symbol}: signal={signal} | {reason} | close={latest['close']:.2f} "
+                f"RSI={latest.get('rsi', 0):.1f} ADX={latest.get('adx', 0):.1f}"
+            )
+            if not signal:
+                continue
 
-        notional = calculate_notional_size(equity, float(latest["close"]), float(latest["atr"]))
-        if notional <= 0:
-            log.info(f"{symbol}: SKIP notional too small")
-            continue
+            notional = calculate_notional_size(equity, float(latest["close"]), float(latest["atr"]))
+            if notional <= 0:
+                log.info(f"{symbol}: SKIP notional too small")
+                continue
 
-        order = submit_crypto_entry_order(trading_client, symbol, notional)
-        stop = round(float(latest["close"]) - float(latest["atr"]) * CRYPTO_STOP_ATR_MULTIPLIER, 4)
-        target = round(float(latest["close"]) + float(latest["atr"]) * CRYPTO_TARGET_ATR_MULTIPLIER, 4)
-        log_rows.append(
-            {
-                "timestamp_utc": shared.now_utc_iso(),
-                "symbol": symbol,
-                "side": "BUY",
-                "order_id": str(order.id),
-                "entry_reference_price": round(float(latest["close"]), 4),
-                "stop_loss_price": stop,
-                "take_profit_price": target,
-                "strategy": "crypto_momentum_v1",
-                "closed": False,
-                "notes": {"reason": reason, "notional": notional},
-            }
-        )
-        save_crypto_trade_log(log_rows)
-        monitor.notify_trade_entry(
-            bot="crypto",
-            symbol=symbol,
-            direction="long",
-            qty=f"${notional:.2f} notional",
-            entry_price=round(float(latest["close"]), 2),
-            stop=stop,
-            target=target,
-        )
+            order = submit_crypto_entry_order(trading_client, symbol, notional)
+            stop = round(float(latest["close"]) - float(latest["atr"]) * CRYPTO_STOP_ATR_MULTIPLIER, 4)
+            target = round(float(latest["close"]) + float(latest["atr"]) * CRYPTO_TARGET_ATR_MULTIPLIER, 4)
+            log_rows.append(
+                {
+                    "timestamp_utc": shared.now_utc_iso(),
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "order_id": str(order.id),
+                    "entry_reference_price": round(float(latest["close"]), 4),
+                    "stop_loss_price": stop,
+                    "take_profit_price": target,
+                    "strategy": "crypto_momentum_v1",
+                    "closed": False,
+                    "notes": {"reason": reason, "notional": notional},
+                }
+            )
+            save_crypto_trade_log(log_rows)
+            monitor.notify_trade_entry(
+                bot="crypto",
+                symbol=symbol,
+                direction="long",
+                qty=f"${notional:.2f} notional",
+                entry_price=round(float(latest["close"]), 2),
+                stop=stop,
+                target=target,
+            )
+        except Exception as exc:
+            log.error("%s: error during entry scan, skipping: %s", symbol, exc)
 
 
 def manage_open_positions(trading_client: TradingClient, data_client: CryptoHistoricalDataClient) -> None:
@@ -254,74 +290,77 @@ def manage_open_positions(trading_client: TradingClient, data_client: CryptoHist
 
     log_rows = load_crypto_trade_log()
     for symbol_key, position in positions.items():
-        symbol = symbol_key if "/" in symbol_key else f"{symbol_key[:-3]}/{symbol_key[-3:]}"
-        raw = fetch_crypto_bars(data_client, symbol)
-        if raw.empty:
-            continue
-        df = shared.calculate_indicators(raw)
-        latest = df.iloc[-1]
-        price = float(latest["close"])
-        qty = float(position.qty)
+        try:
+            symbol = symbol_key if "/" in symbol_key else f"{symbol_key[:-3]}/{symbol_key[-3:]}"
+            raw = fetch_crypto_bars(data_client, symbol)
+            if raw.empty:
+                continue
+            df = shared.calculate_indicators(raw)
+            latest = df.iloc[-1]
+            price = float(latest["close"])
+            qty = float(position.qty)
 
-        open_entry = next(
-            (
-                row
-                for row in reversed(log_rows)
-                if row.get("symbol", "").replace("/", "") == symbol_key.replace("/", "")
-                and row.get("side") == "BUY"
-                and not row.get("closed", False)
-            ),
-            None,
-        )
-        if not open_entry:
-            continue
+            open_entry = next(
+                (
+                    row
+                    for row in reversed(log_rows)
+                    if row.get("symbol", "").replace("/", "") == symbol_key.replace("/", "")
+                    and row.get("side") == "BUY"
+                    and not row.get("closed", False)
+                ),
+                None,
+            )
+            if not open_entry:
+                continue
 
-        stop_price = float(open_entry["stop_loss_price"])
-        target_price = float(open_entry["take_profit_price"])
-        exit_reason = None
+            stop_price = float(open_entry["stop_loss_price"])
+            target_price = float(open_entry["take_profit_price"])
+            exit_reason = None
 
-        if price <= stop_price:
-            exit_reason = "STOP_LOSS"
-        elif price >= target_price:
-            exit_reason = "TAKE_PROFIT"
-        elif latest.get("ema_fast", 0) < latest.get("ema_slow", 0):
-            exit_reason = "TREND_REVERSAL"
+            if price <= stop_price:
+                exit_reason = "STOP_LOSS"
+            elif price >= target_price:
+                exit_reason = "TAKE_PROFIT"
+            elif latest.get("ema_fast", 0) < latest.get("ema_slow", 0):
+                exit_reason = "TREND_REVERSAL"
 
-        if not exit_reason:
-            log.info(f"{symbol}: HOLD | px={price:.2f} stop={stop_price:.2f} target={target_price:.2f}")
-            continue
+            if not exit_reason:
+                log.info(f"{symbol}: HOLD | px={price:.2f} stop={stop_price:.2f} target={target_price:.2f}")
+                continue
 
-        order = submit_crypto_exit_order(trading_client, symbol, qty)
-        pnl = round((price - float(open_entry["entry_reference_price"])) * abs(qty), 2)
+            order = submit_crypto_exit_order(trading_client, symbol, qty)
+            pnl = round((price - float(open_entry["entry_reference_price"])) * abs(qty), 2)
 
-        open_entry["closed"] = True
-        open_entry["exit"] = {
-            "timestamp_utc": shared.now_utc_iso(),
-            "reason": exit_reason,
-            "exit_reference_price": round(price, 4),
-            "order_id": str(order.id),
-            "realized_pnl": pnl,
-        }
-        log_rows.append(
-            {
+            open_entry["closed"] = True
+            open_entry["exit"] = {
                 "timestamp_utc": shared.now_utc_iso(),
-                "symbol": symbol,
-                "side": "SELL",
+                "reason": exit_reason,
+                "exit_reference_price": round(price, 4),
                 "order_id": str(order.id),
                 "realized_pnl": pnl,
-                "notes": {"reason": exit_reason},
             }
-        )
-        save_crypto_trade_log(log_rows)
-        monitor.notify_trade_exit(
-            bot="crypto",
-            symbol=symbol,
-            direction="long",
-            reason=exit_reason,
-            exit_price=price,
-            pnl=pnl,
-        )
-        log.info(f"{symbol}: EXIT {exit_reason} | pnl=${pnl:.2f}")
+            log_rows.append(
+                {
+                    "timestamp_utc": shared.now_utc_iso(),
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "order_id": str(order.id),
+                    "realized_pnl": pnl,
+                    "notes": {"reason": exit_reason},
+                }
+            )
+            save_crypto_trade_log(log_rows)
+            monitor.notify_trade_exit(
+                bot="crypto",
+                symbol=symbol,
+                direction="long",
+                reason=exit_reason,
+                exit_price=price,
+                pnl=pnl,
+            )
+            log.info(f"{symbol}: EXIT {exit_reason} | pnl=${pnl:.2f}")
+        except Exception as exc:
+            log.error("%s: error during position management, skipping: %s", symbol_key, exc)
 
 
 def print_crypto_summary(trading_client: TradingClient) -> None:
@@ -359,29 +398,40 @@ def run_bot() -> None:
         float(account.equity),
         float(account.buying_power),
     )
+    log.info(
+        "Run loop active | interval=%ds | daily_loss_limit=%.1f%%",
+        CRYPTO_RUN_INTERVAL_SECONDS,
+        CRYPTO_MAX_DAILY_LOSS_PCT * 100,
+    )
 
-    manage_open_positions(trading_client, data_client)
-    scan_for_entries(trading_client, data_client)
-    print_crypto_summary(trading_client)
+    while True:
+        try:
+            manage_open_positions(trading_client, data_client)
+            scan_for_entries(trading_client, data_client)
+            print_crypto_summary(trading_client)
 
-    # Monitoring — heartbeat + optional run-complete notification
-    try:
-        _account = shared.retry_api_call(trading_client.get_account)
-        _equity = float(_account.equity)
-        _open_n = len(get_open_crypto_positions(trading_client))
-        _log_rows = load_crypto_trade_log()
-        today = datetime.now(timezone.utc).date().isoformat()
-        _realized = sum(
-            float(r.get("realized_pnl", 0.0))
-            for r in _log_rows
-            if r.get("side") == "SELL" and str(r.get("timestamp_utc", "")).startswith(today)
-        )
-        monitor.write_heartbeat("crypto", _equity, _open_n)
-        monitor.notify_run_complete("crypto", _equity, _open_n, _realized)
-    except Exception as _mon_exc:
-        log.warning("monitor phase failed (non-critical): %s", _mon_exc)
+            # Monitoring — heartbeat + optional run-complete notification
+            try:
+                _account = shared.retry_api_call(trading_client.get_account)
+                _equity = float(_account.equity)
+                _open_n = len(get_open_crypto_positions(trading_client))
+                _log_rows = load_crypto_trade_log()
+                today = datetime.now(timezone.utc).date().isoformat()
+                _realized = sum(
+                    float(r.get("realized_pnl", 0.0))
+                    for r in _log_rows
+                    if r.get("side") == "SELL" and str(r.get("timestamp_utc", "")).startswith(today)
+                )
+                monitor.write_heartbeat("crypto", _equity, _open_n)
+                monitor.notify_run_complete("crypto", _equity, _open_n, _realized)
+            except Exception as _mon_exc:
+                log.warning("monitor phase failed (non-critical): %s", _mon_exc)
 
-    log.info("Crypto run complete")
+            log.info("Crypto run complete — sleeping %ds before next cycle", CRYPTO_RUN_INTERVAL_SECONDS)
+        except Exception as cycle_exc:
+            log.error("Run cycle error (will retry next interval): %s", cycle_exc)
+
+        time.sleep(CRYPTO_RUN_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
