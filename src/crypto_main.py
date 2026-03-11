@@ -19,8 +19,6 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
-import time
-
 import main as shared
 import monitor
 
@@ -57,7 +55,6 @@ CRYPTO_MIN_ATR_PCT            = float(os.getenv("CRYPTO_MIN_ATR_PCT",           
 CRYPTO_MAX_ATR_PCT            = float(os.getenv("CRYPTO_MAX_ATR_PCT",             "0.10"))
 CRYPTO_LOOKBACK_DAYS          = int(os.getenv("CRYPTO_LOOKBACK_DAYS",             "220"))
 CRYPTO_MAX_DAILY_LOSS_PCT     = float(os.getenv("CRYPTO_MAX_DAILY_LOSS_PCT",      "0.02"))
-CRYPTO_RUN_INTERVAL_SECONDS   = int(os.getenv("CRYPTO_RUN_INTERVAL_SECONDS",      "900"))
 # OPT: volume confirmation gate — only enter when current bar volume > 20-period average
 CRYPTO_VOLUME_FILTER          = os.getenv("CRYPTO_VOLUME_FILTER", "true").strip().lower() in {"1", "true", "yes", "on"}
 CROSSOVER_LOOKBACK_CANDLES    = 3
@@ -576,7 +573,7 @@ def print_crypto_summary(trading_client: TradingClient) -> None:
 def run_bot() -> None:
     shared.load_environment()
     log.info("=" * 70)
-    log.info("CRYPTO PAPER TRADING BOT STARTUP (24/7) | universe=%s", ", ".join(CRYPTO_WATCHLIST))
+    log.info("CRYPTO PAPER TRADING BOT STARTUP | universe=%s", ", ".join(CRYPTO_WATCHLIST))
     log.info("=" * 70)
 
     config = validate_crypto_startup_config()
@@ -589,40 +586,30 @@ def run_bot() -> None:
         float(account.equity),
         float(account.buying_power),
     )
-    log.info(
-        "Run loop active | interval=%ds | daily_loss_limit=%.1f%%",
-        CRYPTO_RUN_INTERVAL_SECONDS,
-        CRYPTO_MAX_DAILY_LOSS_PCT * 100,
-    )
+    log.info("daily_loss_limit=%.1f%%", CRYPTO_MAX_DAILY_LOSS_PCT * 100)
 
-    while True:
-        try:
-            manage_open_positions(trading_client, data_client)
-            scan_for_entries(trading_client, data_client)
-            print_crypto_summary(trading_client)
+    manage_open_positions(trading_client, data_client)
+    scan_for_entries(trading_client, data_client)
+    print_crypto_summary(trading_client)
 
-            # Monitoring — heartbeat + optional run-complete notification
-            try:
-                _account = shared.retry_api_call(trading_client.get_account)
-                _equity = float(_account.equity)
-                _open_n = len(get_open_crypto_positions(trading_client))
-                _log_rows = load_crypto_trade_log()
-                today = datetime.now(timezone.utc).date().isoformat()
-                _realized = sum(
-                    float(r.get("realized_pnl", 0.0))
-                    for r in _log_rows
-                    if r.get("side") in {"SELL", "COVER"} and str(r.get("timestamp_utc", "")).startswith(today)
-                )
-                monitor.write_heartbeat("crypto", _equity, _open_n)
-                monitor.notify_run_complete("crypto", _equity, _open_n, _realized)
-            except Exception as _mon_exc:
-                log.warning("monitor phase failed (non-critical): %s", _mon_exc)
+    # Monitoring — heartbeat + optional run-complete notification
+    try:
+        _account = shared.retry_api_call(trading_client.get_account)
+        _equity = float(_account.equity)
+        _open_n = len(get_open_crypto_positions(trading_client))
+        _log_rows = load_crypto_trade_log()
+        today = datetime.now(timezone.utc).date().isoformat()
+        _realized = sum(
+            float(r.get("realized_pnl", 0.0))
+            for r in _log_rows
+            if r.get("side") in {"SELL", "COVER"} and str(r.get("timestamp_utc", "")).startswith(today)
+        )
+        monitor.write_heartbeat("crypto", _equity, _open_n)
+        monitor.notify_run_complete("crypto", _equity, _open_n, _realized)
+    except Exception as _mon_exc:
+        log.warning("monitor phase failed (non-critical): %s", _mon_exc)
 
-            log.info("Crypto run complete — sleeping %ds before next cycle", CRYPTO_RUN_INTERVAL_SECONDS)
-        except Exception as cycle_exc:
-            log.error("Run cycle error (will retry next interval): %s", cycle_exc)
-
-        time.sleep(CRYPTO_RUN_INTERVAL_SECONDS)
+    log.info("Crypto run complete — exiting")
 
 
 if __name__ == "__main__":
