@@ -28,6 +28,8 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
+import monitor
+
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
@@ -1505,6 +1507,15 @@ def manage_open_positions(trading_client: TradingClient,
             }
             log_data.append(exit_log)
             save_trade_log(log_data)
+            monitor.notify_trade_exit(
+                bot="stocks",
+                symbol=symbol,
+                direction=direction,
+                reason=exit_reason,
+                exit_price=current_price,
+                pnl=realized_pnl,
+                r_multiple=round(r_multiple, 2),
+            )
 
             log.info(
                 f"{symbol}: {exit_side} | Order: {close_order.id} | "
@@ -1559,6 +1570,9 @@ def scan_for_new_entries(trading_client: TradingClient,
 
     if loss_limit_hit:
         log.warning("DAILY LOSS LIMIT HIT — no new trades today.")
+        monitor.notify_daily_loss_limit(
+            "stocks", realized_today, loss_limit_dollars, account_equity
+        )
         return
 
     if len(effective_open_positions) >= MAX_OPEN_POSITIONS:
@@ -1698,6 +1712,16 @@ def scan_for_new_entries(trading_client: TradingClient,
                 }
             }
             append_trade_log(log_entry)
+            monitor.notify_trade_entry(
+                bot="stocks",
+                symbol=symbol,
+                direction=direction,
+                qty=qty,
+                entry_price=entry_price,
+                stop=stop_price,
+                target=take_profit_price,
+                regime=regime,
+            )
 
             log.info(f"{symbol}: {dir_label} ORDER PLACED | ID: {order.id}")
             entries_this_run += 1
@@ -1799,6 +1823,16 @@ def run_bot() -> None:
 
     # Phase 3: Daily summary + equity curve
     print_daily_summary(trading_client)
+
+    # Phase 4: Monitoring — heartbeat + optional run-complete notification
+    try:
+        _equity = get_account_equity(trading_client)
+        _open_n = len(get_open_positions(trading_client))
+        _realized = get_realized_pnl_today(load_trade_log())
+        monitor.write_heartbeat("stocks", _equity, _open_n)
+        monitor.notify_run_complete("stocks", _equity, _open_n, _realized)
+    except Exception as _mon_exc:
+        log.warning("monitor phase failed (non-critical): %s", _mon_exc)
 
     log.info("Run complete.\n")
 

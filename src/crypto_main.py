@@ -20,6 +20,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
 import main as shared
+import monitor
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -234,6 +235,15 @@ def scan_for_entries(trading_client: TradingClient, data_client: CryptoHistorica
             }
         )
         save_crypto_trade_log(log_rows)
+        monitor.notify_trade_entry(
+            bot="crypto",
+            symbol=symbol,
+            direction="long",
+            qty=f"${notional:.2f} notional",
+            entry_price=round(float(latest["close"]), 2),
+            stop=stop,
+            target=target,
+        )
 
 
 def manage_open_positions(trading_client: TradingClient, data_client: CryptoHistoricalDataClient) -> None:
@@ -303,6 +313,14 @@ def manage_open_positions(trading_client: TradingClient, data_client: CryptoHist
             }
         )
         save_crypto_trade_log(log_rows)
+        monitor.notify_trade_exit(
+            bot="crypto",
+            symbol=symbol,
+            direction="long",
+            reason=exit_reason,
+            exit_price=price,
+            pnl=pnl,
+        )
         log.info(f"{symbol}: EXIT {exit_reason} | pnl=${pnl:.2f}")
 
 
@@ -322,6 +340,7 @@ def print_crypto_summary(trading_client: TradingClient) -> None:
         len(open_positions),
         realized,
     )
+    monitor.log_equity_curve("crypto", equity, len(open_positions))
 
 
 def run_bot() -> None:
@@ -344,6 +363,24 @@ def run_bot() -> None:
     manage_open_positions(trading_client, data_client)
     scan_for_entries(trading_client, data_client)
     print_crypto_summary(trading_client)
+
+    # Monitoring — heartbeat + optional run-complete notification
+    try:
+        _account = shared.retry_api_call(trading_client.get_account)
+        _equity = float(_account.equity)
+        _open_n = len(get_open_crypto_positions(trading_client))
+        _log_rows = load_crypto_trade_log()
+        today = datetime.now(timezone.utc).date().isoformat()
+        _realized = sum(
+            float(r.get("realized_pnl", 0.0))
+            for r in _log_rows
+            if r.get("side") == "SELL" and str(r.get("timestamp_utc", "")).startswith(today)
+        )
+        monitor.write_heartbeat("crypto", _equity, _open_n)
+        monitor.notify_run_complete("crypto", _equity, _open_n, _realized)
+    except Exception as _mon_exc:
+        log.warning("monitor phase failed (non-critical): %s", _mon_exc)
+
     log.info("Crypto run complete")
 
 
